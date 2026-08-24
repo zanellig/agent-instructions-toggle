@@ -1,0 +1,700 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly AIT_LAB_PROJECT_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+readonly AIT_LAB_STATE_ROOT=${AIT_LAB_STATE_ROOT:-"$AIT_LAB_PROJECT_ROOT/.ait-lab-state"}
+readonly AIT_LAB_ACTIVE_FILE="$AIT_LAB_STATE_ROOT/active"
+readonly AIT_LAB_FIXTURES="$AIT_LAB_PROJECT_ROOT/tests/ait-lab/fixtures"
+readonly AIT_LAB_STUBS="$AIT_LAB_PROJECT_ROOT/tests/ait-lab/stubs"
+AIT_LAB_SUPERVISED_SESSION=""
+AIT_LAB_SUPERVISED_PROXY_SOCKET=""
+AIT_LAB_SUPERVISED_PROXY_PID=""
+AIT_LAB_SUPERVISED_TRAY_PID=""
+
+usage() {
+    printf '%s\n' \
+        'usage: ./ait-lab use <claude|codex-nc|codex-fc>' \
+        '       ./ait-lab app <arguments...>' \
+        '       ./ait-lab statusline <fixture>' \
+        '       ./ait-lab claude' \
+        '       ./ait-lab show' \
+        '       ./ait-lab stop'
+}
+
+die() {
+    printf 'ait-lab: %s\n' "$*" >&2
+    exit 1
+}
+
+require_command() {
+    command -v -- "$1" >/dev/null 2>&1 || die "required command is missing: $1"
+}
+
+implementation_branch() {
+    case "$1" in
+        claude) printf 'spec-1-agent-instructions\n' ;;
+        codex-nc) printf 'issue-1-agent-instructions\n' ;;
+        codex-fc) printf 'codex/full-context-implementation\n' ;;
+        *) die "unknown implementation '$1'; expected claude, codex-nc, or codex-fc" ;;
+    esac
+}
+
+implementation_override() {
+    case "$1" in
+        claude) printf '%s' "${AIT_LAB_WORKTREE_CLAUDE:-}" ;;
+        codex-nc) printf '%s' "${AIT_LAB_WORKTREE_CODEX_NC:-}" ;;
+        codex-fc) printf '%s' "${AIT_LAB_WORKTREE_CODEX_FC:-}" ;;
+    esac
+}
+
+discover_worktree() {
+    local implementation=$1
+    local branch override worktree
+
+    branch=$(implementation_branch "$implementation")
+    override=$(implementation_override "$implementation")
+    if [[ -n "$override" ]]; then
+        worktree=$override
+    else
+        worktree=$(git -C "$AIT_LAB_PROJECT_ROOT" worktree list --porcelain | awk \
+            -v expected="refs/heads/$branch" '
+                /^worktree / { path = substr($0, 10) }
+                /^branch / && substr($0, 8) == expected { print path; exit }
+            ')
+    fi
+
+    [[ -n "$worktree" ]] || die "no worktree has branch $branch"
+    [[ -d "$worktree" ]] || die "worktree does not exist: $worktree"
+    worktree=$(realpath -e -- "$worktree")
+    [[ -f "$worktree/Cargo.toml" ]] || die "worktree has no Cargo.toml: $worktree"
+    [[ -f "$worktree/install.sh" ]] || die "worktree has no install.sh: $worktree"
+    printf '%s\n' "$worktree"
+}
+
+validate_session_directory() {
+    local session=$1
+    local state_root
+
+    state_root=$(realpath -m -- "$AIT_LAB_STATE_ROOT")
+    session=$(realpath -m -- "$session")
+    case "$session" in
+        "$state_root"/sessions/*) ;;
+        *) die "active session points outside the lab state directory" ;;
+    esac
+    [[ -d "$session" ]] || die "active session no longer exists: $session"
+    [[ -f "$session/manifest.json" ]] || die "lab session has no manifest: $session"
+    printf '%s\n' "$session"
+}
+
+active_session() {
+    [[ -s "$AIT_LAB_ACTIVE_FILE" ]] || return 1
+    validate_session_directory "$(<"$AIT_LAB_ACTIVE_FILE")"
+}
+
+write_active_session() {
+    local session=$1
+    local temporary="$AIT_LAB_ACTIVE_FILE.tmp.$$"
+
+    mkdir -p -- "$AIT_LAB_STATE_ROOT"
+    printf '%s\n' "$session" > "$temporary"
+    mv -f -- "$temporary" "$AIT_LAB_ACTIVE_FILE"
+}
+
+seed_session() {
+    local session=$1
+    local profile template command
+
+    mkdir -p -- \
+        "$session/home" \
+        "$session/project" \
+        "$session/logs" \
+        "$session/runtime" \
+        "$session/source" \
+        "$session/tools" \
+        "$session/xdg/bin" \
+        "$session/xdg/cache" \
+        "$session/xdg/config" \
+        "$session/xdg/data" \
+        "$session/xdg/runtime" \
+        "$session/xdg/state"
+    cp -a -- "$AIT_LAB_FIXTURES/home/." "$session/home/"
+
+    for profile in .claude .claude_work; do
+        cp -- "$AIT_LAB_FIXTURES/base-statusline.sh" "$session/home/$profile/base-statusline.sh"
+        chmod 755 "$session/home/$profile/base-statusline.sh"
+        template="$session/home/$profile/settings.json.in"
+        command="/lab/session/home/$profile/base-statusline.sh"
+        jq --arg command "$command" '.statusLine.command = $command' \
+            "$template" > "$session/home/$profile/settings.json"
+    done
+
+    for command in kbuildsycoca5 kbuildsycoca6 update-desktop-database; do
+        cp -- "$AIT_LAB_STUBS/kbuildsycoca" "$session/tools/$command"
+        chmod 755 "$session/tools/$command"
+    done
+}
+
+snapshot_source() {
+    local worktree=$1
+    local session=$2
+
+    if git -C "$worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        git -C "$worktree" ls-files -co --exclude-standard -z | while IFS= read -r -d '' path; do
+            if [[ -e "$worktree/$path" || -L "$worktree/$path" ]]; then
+                printf '%s\0' "$path"
+            fi
+        done | tar -C "$worktree" --null --files-from=- -cf - \
+            | tar -C "$session/source" -xf -
+    else
+        tar -C "$worktree" \
+            --exclude='./.git' \
+            --exclude='./target' \
+            -cf - . | tar -C "$session/source" -xf -
+    fi
+}
+
+toolchain_root() {
+    local cargo_executable
+
+    require_command rustup
+    cargo_executable=$(rustup which cargo)
+    dirname -- "$(dirname -- "$cargo_executable")"
+}
+
+build_sandbox() {
+    local session=$1
+    local build_target=$2
+    local cargo_cache=$3
+    local rust_toolchain=$4
+
+    printf '%s\0' \
+        bwrap \
+        --die-with-parent \
+        --ro-bind /usr /usr \
+        --ro-bind /etc /etc \
+        --symlink usr/bin /bin \
+        --symlink usr/lib /lib \
+        --symlink usr/lib /lib64 \
+        --symlink usr/bin /sbin \
+        --dev /dev \
+        --proc /proc \
+        --tmpfs /tmp \
+        --dir /lab \
+        --bind "$session" /lab/session \
+        --bind "$build_target" /lab/build-target \
+        --bind "$cargo_cache" /lab/cargo-home \
+        --ro-bind "$rust_toolchain" /toolchain \
+        --unshare-all \
+        --share-net \
+        --clearenv \
+        --setenv HOME /lab/session/home \
+        --setenv XDG_BIN_HOME /lab/session/xdg/bin \
+        --setenv XDG_CACHE_HOME /lab/session/xdg/cache \
+        --setenv XDG_CONFIG_HOME /lab/session/xdg/config \
+        --setenv XDG_DATA_HOME /lab/session/xdg/data \
+        --setenv XDG_RUNTIME_DIR /lab/session/xdg/runtime \
+        --setenv XDG_STATE_HOME /lab/session/xdg/state \
+        --setenv CLAUDE_CONFIG_DIR /lab/session/home/.claude \
+        --setenv CARGO_HOME /lab/cargo-home \
+        --setenv CARGO_TARGET_DIR /lab/session/source/target \
+        --setenv KBUILDSYCOCA /lab/session/tools/kbuildsycoca6 \
+        --setenv AIT_LAB_STUB_LOG /lab/session/logs/desktop-refresh.log \
+        --setenv PATH /lab/session/tools:/toolchain/bin:/usr/bin:/bin \
+        --setenv LANG C.UTF-8 \
+        --chdir /lab/session/source
+}
+
+run_build_and_install() {
+    local implementation=$1
+    local session=$2
+    local build_target=$3
+    local cargo_cache=$4
+    local rust_toolchain=$5
+    local -a sandbox installer
+
+    mapfile -d '' -t sandbox < <(build_sandbox "$session" "$build_target" "$cargo_cache" "$rust_toolchain")
+    "${sandbox[@]}" \
+        --setenv AIT_LAB_IMPLEMENTATION "$implementation" \
+        /toolchain/bin/cargo build --release --locked --manifest-path /lab/session/source/Cargo.toml \
+        || return 1
+
+    case "$implementation" in
+        codex-nc)
+            installer=(/usr/bin/bash /lab/session/source/install.sh \
+                --binary /lab/session/source/target/release/agent-instructions \
+                --no-refresh)
+            ;;
+        *)
+            installer=(/usr/bin/bash /lab/session/source/install.sh)
+            ;;
+    esac
+    "${sandbox[@]}" --setenv AIT_LAB_IMPLEMENTATION "$implementation" "${installer[@]}" \
+        || return 1
+}
+
+installed_binary_paths() {
+    local implementation=$1
+    local session=$2
+
+    if [[ "$implementation" == codex-nc ]]; then
+        printf '%s\n%s\n' \
+            "$session/home/.local/bin/agent-instructions" \
+            /lab/session/home/.local/bin/agent-instructions
+    else
+        printf '%s\n%s\n' \
+            "$session/xdg/bin/agent-instructions" \
+            /lab/session/xdg/bin/agent-instructions
+    fi
+}
+
+write_manifest() {
+    local implementation=$1
+    local branch=$2
+    local worktree=$3
+    local session=$4
+    local host_binary=$5
+    local sandbox_binary=$6
+    local revision="fixture"
+    local worktree_status=""
+    local snapshot_digest
+
+    if git -C "$worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        revision=$(git -C "$worktree" rev-parse HEAD)
+        worktree_status=$(git -C "$worktree" status --short)
+    fi
+    snapshot_digest=$(tar -C "$session/source" \
+        --sort=name \
+        --mtime='UTC 1970-01-01' \
+        --owner=0 \
+        --group=0 \
+        --numeric-owner \
+        -cf - . | sha256sum)
+    snapshot_digest=${snapshot_digest%% *}
+
+    jq -n \
+        --arg implementation "$implementation" \
+        --arg branch "$branch" \
+        --arg worktree "$worktree" \
+        --arg revision "$revision" \
+        --arg worktreeStatus "$worktree_status" \
+        --arg snapshotDigest "$snapshot_digest" \
+        --arg session "$session" \
+        --arg hostBinary "$host_binary" \
+        --arg sandboxBinary "$sandbox_binary" \
+        --arg createdAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{
+            implementation: $implementation,
+            branch: $branch,
+            worktree: $worktree,
+            revision: $revision,
+            worktreeStatus: $worktreeStatus,
+            snapshotDigest: $snapshotDigest,
+            session: $session,
+            hostBinary: $hostBinary,
+            sandboxBinary: $sandboxBinary,
+            createdAt: $createdAt
+        }' > "$session/manifest.json"
+}
+
+runtime_sandbox() {
+    local session=$1
+    local host_binary sandbox_binary
+
+    printf '%s\0' \
+        bwrap \
+        --die-with-parent \
+        --ro-bind /usr /usr \
+        --ro-bind /etc /etc \
+        --symlink usr/bin /bin \
+        --symlink usr/lib /lib \
+        --symlink usr/lib /lib64 \
+        --symlink usr/bin /sbin \
+        --dev /dev \
+        --proc /proc \
+        --tmpfs /tmp \
+        --dir /lab \
+        --ro-bind "$session" /lab/session \
+        --bind "$session/home" /lab/session/home \
+        --bind "$session/project" /lab/session/project \
+        --bind "$session/xdg" /lab/session/xdg \
+        --ro-bind "$AIT_LAB_STATE_ROOT/bus" /lab/bus \
+        --unshare-all \
+        --as-pid-1 \
+        --clearenv \
+        --setenv HOME /lab/session/home \
+        --setenv XDG_BIN_HOME /lab/session/xdg/bin \
+        --setenv XDG_CACHE_HOME /lab/session/xdg/cache \
+        --setenv XDG_CONFIG_HOME /lab/session/xdg/config \
+        --setenv XDG_DATA_HOME /lab/session/xdg/data \
+        --setenv XDG_RUNTIME_DIR /lab/session/xdg/runtime \
+        --setenv XDG_STATE_HOME /lab/session/xdg/state \
+        --setenv CLAUDE_CONFIG_DIR /lab/session/home/.claude \
+        --setenv PATH /lab/session/tools:/usr/bin:/bin \
+        --setenv LANG C.UTF-8 \
+        --setenv TERM "${TERM:-xterm-256color}" \
+        --setenv USER lab \
+        --setenv SHELL /bin/bash \
+        --chdir /lab/session/project
+
+    host_binary=$(jq -r '.hostBinary' "$session/manifest.json")
+    sandbox_binary=$(jq -r '.sandboxBinary' "$session/manifest.json")
+    printf '%s\0' --ro-bind "$host_binary" "$sandbox_binary"
+}
+
+run_active_app() {
+    local session sandbox_binary proxy_name proxy_socket
+    local -a sandbox
+
+    session=$(active_session) || die 'no active lab session; run ./ait-lab use first'
+    sandbox_binary=$(jq -r '.sandboxBinary' "$session/manifest.json")
+    proxy_name=$(<"$session/runtime/dbus-socket-name")
+    proxy_socket="$AIT_LAB_STATE_ROOT/bus/$proxy_name"
+    [[ -S "$proxy_socket" ]] || die 'the active session bus proxy is not running'
+    mapfile -d '' -t sandbox < <(runtime_sandbox "$session")
+    "${sandbox[@]}" \
+        --setenv DBUS_SESSION_BUS_ADDRESS "unix:path=/lab/bus/$proxy_name" \
+        "$sandbox_binary" "$@"
+}
+
+run_statusline_fixture() {
+    local fixture=$1
+    local session input settings status_command
+    local -a sandbox
+
+    [[ "$fixture" =~ ^[a-zA-Z0-9][a-zA-Z0-9_-]*$ ]] || die "invalid status-line fixture name: $fixture"
+    input="$AIT_LAB_FIXTURES/statusline-inputs/$fixture.json"
+    [[ -f "$input" ]] || die "unknown status-line fixture: $fixture"
+    session=$(active_session) || die 'no active lab session; run ./ait-lab use first'
+    settings="$session/home/.claude/settings.json"
+    [[ -f "$settings" ]] || die 'the active installer did not create Claude settings'
+    status_command=$(jq -er '.statusLine.command | select(type == "string" and length > 0)' "$settings") \
+        || die 'the active installer did not configure a status-line command'
+
+    mapfile -d '' -t sandbox < <(runtime_sandbox "$session")
+    "${sandbox[@]}" /usr/bin/python3 -c '
+import shlex
+import subprocess
+import sys
+
+arguments = shlex.split(sys.argv[1])
+if not arguments:
+    raise SystemExit("empty status-line command")
+completed = subprocess.run(arguments, input=sys.stdin.buffer.read(), check=False)
+raise SystemExit(completed.returncode)
+' "$status_command" < "$input" | tee "$session/logs/statusline-$fixture.log"
+}
+
+launch_claude() {
+    local session claude_executable
+    local -a sandbox
+
+    session=$(active_session) || die 'no active lab session; run ./ait-lab use first'
+    claude_executable=${AIT_LAB_CLAUDE_EXECUTABLE:-}
+    if [[ -z "$claude_executable" ]]; then
+        claude_executable=$(command -v claude || true)
+    fi
+    [[ -n "$claude_executable" ]] || die 'claude executable was not found'
+    claude_executable=$(realpath -e -- "$claude_executable")
+    [[ -x "$claude_executable" && -f "$claude_executable" ]] \
+        || die "claude executable is not a regular executable file: $claude_executable"
+
+    mapfile -d '' -t sandbox < <(runtime_sandbox "$session")
+    "${sandbox[@]}" \
+        --ro-bind "$claude_executable" /lab/claude \
+        --share-net \
+        /lab/claude
+}
+
+cleanup_supervised_session() {
+    local group_alive=false
+
+    if [[ -n "$AIT_LAB_SUPERVISED_TRAY_PID" ]] \
+        && kill -0 -- "-$AIT_LAB_SUPERVISED_TRAY_PID" >/dev/null 2>&1; then
+        group_alive=true
+        kill -TERM -- "-$AIT_LAB_SUPERVISED_TRAY_PID" >/dev/null 2>&1 || true
+    fi
+    if [[ "$group_alive" == true ]]; then
+        for _ in {1..100}; do
+            kill -0 -- "-$AIT_LAB_SUPERVISED_TRAY_PID" >/dev/null 2>&1 || break
+            sleep 0.05
+        done
+        if kill -0 -- "-$AIT_LAB_SUPERVISED_TRAY_PID" >/dev/null 2>&1; then
+            kill -KILL -- "-$AIT_LAB_SUPERVISED_TRAY_PID" >/dev/null 2>&1 || true
+        fi
+    fi
+    if [[ -n "$AIT_LAB_SUPERVISED_PROXY_PID" ]] \
+        && kill -0 "$AIT_LAB_SUPERVISED_PROXY_PID" >/dev/null 2>&1; then
+        kill "$AIT_LAB_SUPERVISED_PROXY_PID" >/dev/null 2>&1 || true
+    fi
+    [[ -z "$AIT_LAB_SUPERVISED_TRAY_PID" ]] \
+        || wait "$AIT_LAB_SUPERVISED_TRAY_PID" >/dev/null 2>&1 || true
+    [[ -z "$AIT_LAB_SUPERVISED_PROXY_PID" ]] \
+        || wait "$AIT_LAB_SUPERVISED_PROXY_PID" >/dev/null 2>&1 || true
+    if [[ -n "$AIT_LAB_SUPERVISED_SESSION" ]]; then
+        rm -f -- "$AIT_LAB_SUPERVISED_SESSION/runtime/ready"
+    fi
+    if [[ -n "$AIT_LAB_SUPERVISED_PROXY_SOCKET" ]]; then
+        rm -f -- "$AIT_LAB_SUPERVISED_PROXY_SOCKET"
+    fi
+}
+
+supervise_session() {
+    local session=$1
+    local sandbox_binary=$2
+    local bus_address=$3
+    local proxy_socket=$4
+    local sandbox_bus_address=$5
+    local -a sandbox
+
+    AIT_LAB_SUPERVISED_SESSION=$session
+    AIT_LAB_SUPERVISED_PROXY_SOCKET=$proxy_socket
+    trap cleanup_supervised_session EXIT
+    trap 'exit 0' TERM INT
+    trap '' HUP
+    rm -f -- "$proxy_socket"
+
+    xdg-dbus-proxy "$bus_address" "$proxy_socket" \
+        --filter \
+        --own=org.kde.StatusNotifierItem-1-1 \
+        --talk=org.kde.StatusNotifierWatcher \
+        --talk=org.freedesktop.Notifications \
+        >> "$session/logs/dbus-proxy.log" 2>&1 &
+    AIT_LAB_SUPERVISED_PROXY_PID=$!
+
+    for _ in {1..100}; do
+        [[ -S "$proxy_socket" ]] && break
+        kill -0 "$AIT_LAB_SUPERVISED_PROXY_PID" >/dev/null 2>&1 || return 1
+        sleep 0.05
+    done
+    [[ -S "$proxy_socket" ]] || return 1
+
+    mapfile -d '' -t sandbox < <(runtime_sandbox "$session")
+    setsid "${sandbox[@]}" \
+        --setenv DBUS_SESSION_BUS_ADDRESS "$sandbox_bus_address" \
+        "$sandbox_binary" tray >> "$session/logs/tray.log" 2>&1 &
+    AIT_LAB_SUPERVISED_TRAY_PID=$!
+    printf '%s\n' "$AIT_LAB_SUPERVISED_PROXY_PID" > "$session/runtime/dbus-proxy.pid"
+    printf '%s\n' "$AIT_LAB_SUPERVISED_TRAY_PID" > "$session/runtime/tray.pid"
+
+    sleep 0.2
+    kill -0 "$AIT_LAB_SUPERVISED_PROXY_PID" >/dev/null 2>&1 || return 1
+    kill -0 -- "-$AIT_LAB_SUPERVISED_TRAY_PID" >/dev/null 2>&1 || return 1
+    touch "$session/runtime/ready"
+
+    while kill -0 "$AIT_LAB_SUPERVISED_PROXY_PID" >/dev/null 2>&1 \
+        && kill -0 -- "-$AIT_LAB_SUPERVISED_TRAY_PID" >/dev/null 2>&1; do
+        sleep 0.5
+    done
+    return 1
+}
+
+start_session() {
+    local session=$1
+    local sandbox_binary bus_address proxy_hash proxy_name proxy_socket sandbox_bus_address
+    local supervisor_unit
+
+    require_command systemctl
+    require_command systemd-run
+    require_command xdg-dbus-proxy
+    bus_address=${AIT_LAB_SESSION_BUS_ADDRESS:-${DBUS_SESSION_BUS_ADDRESS:-}}
+    [[ -n "$bus_address" ]] || die 'DBUS_SESSION_BUS_ADDRESS is not set; a live session bus is required for the tray'
+    sandbox_binary=$(jq -r '.sandboxBinary' "$session/manifest.json")
+    rm -f -- "$session/runtime/ready"
+    mkdir -p -- "$AIT_LAB_STATE_ROOT/bus"
+    proxy_hash=$(printf '%s' "$session" | sha256sum)
+    proxy_name="${proxy_hash%% *}"
+    proxy_name="${proxy_name:0:16}.sock"
+    proxy_socket="$AIT_LAB_STATE_ROOT/bus/$proxy_name"
+    sandbox_bus_address="unix:path=/lab/bus/$proxy_name"
+    printf '%s\n' "$proxy_name" > "$session/runtime/dbus-socket-name"
+    supervisor_unit="ait-lab-${proxy_name%.sock}-$$.service"
+    printf '%s\n' "$supervisor_unit" > "$session/runtime/supervisor-unit"
+
+    systemd-run --user --quiet --collect \
+        --unit "$supervisor_unit" \
+        --setenv "AIT_LAB_STATE_ROOT=$AIT_LAB_STATE_ROOT" \
+        "$AIT_LAB_PROJECT_ROOT/ait-lab" __supervise \
+        "$session" "$sandbox_binary" "$bus_address" "$proxy_socket" "$sandbox_bus_address" \
+        </dev/null >> "$session/logs/supervisor.log" 2>&1 \
+        || return 1
+
+    for _ in {1..100}; do
+        [[ -f "$session/runtime/ready" ]] && return 0
+        systemctl --user is-active --quiet "$supervisor_unit" || break
+        sleep 0.05
+    done
+
+    systemctl --user stop "$supervisor_unit" >/dev/null 2>&1 || true
+    printf 'ait-lab: tray failed to start; see %s\n' "$session/logs/supervisor.log" >&2
+    return 1
+}
+
+supervisor_matches_session() {
+    local session=$1
+    local supervisor_unit
+
+    [[ -f "$session/runtime/supervisor-unit" ]] || return 1
+    supervisor_unit=$(<"$session/runtime/supervisor-unit")
+    [[ "$supervisor_unit" =~ ^ait-lab-[a-f0-9]{16}-[0-9]+\.service$ ]] || return 1
+    systemctl --user is-active --quiet "$supervisor_unit"
+}
+
+stop_session() {
+    local session=$1
+    local supervisor_unit
+
+    [[ -f "$session/runtime/supervisor-unit" ]] || return 0
+    supervisor_unit=$(<"$session/runtime/supervisor-unit")
+    if [[ ! "$supervisor_unit" =~ ^ait-lab-[a-f0-9]{16}-[0-9]+\.service$ ]]; then
+        rm -f -- "$session/runtime/supervisor-unit" "$session/runtime/ready"
+        return 0
+    fi
+
+    systemctl --user stop "$supervisor_unit" >/dev/null 2>&1 || true
+    rm -f -- "$session/runtime/supervisor-unit" "$session/runtime/ready"
+}
+
+use_implementation() {
+    local implementation=$1
+    local branch worktree session_id session build_target cargo_cache rust_toolchain
+    local host_binary sandbox_binary previous=""
+    local -a binary_paths
+
+    require_command bwrap
+    require_command jq
+    require_command sha256sum
+    require_command tar
+    branch=$(implementation_branch "$implementation")
+    worktree=$(discover_worktree "$implementation")
+    session_id="$(date -u +%Y%m%dT%H%M%SZ)-$$-$implementation"
+    session="$AIT_LAB_STATE_ROOT/sessions/$session_id"
+    build_target="$AIT_LAB_STATE_ROOT/builds/$implementation/target"
+    cargo_cache="$AIT_LAB_STATE_ROOT/cargo-home"
+    rust_toolchain=$(toolchain_root)
+
+    umask 077
+    mkdir -p -- "$session" "$build_target" "$cargo_cache"
+    seed_session "$session"
+    snapshot_source "$worktree" "$session"
+    ln -s /lab/build-target "$session/source/target"
+
+    printf 'Preparing %s from %s...\n' "$implementation" "$branch"
+    if ! run_build_and_install "$implementation" "$session" "$build_target" "$cargo_cache" "$rust_toolchain" \
+        > "$session/logs/build-install.log" 2>&1; then
+        printf 'ait-lab: build or install failed; see %s\n' "$session/logs/build-install.log" >&2
+        tail -n 30 "$session/logs/build-install.log" >&2 || true
+        return 1
+    fi
+
+    mapfile -t binary_paths < <(installed_binary_paths "$implementation" "$session")
+    host_binary=${binary_paths[0]}
+    sandbox_binary=${binary_paths[1]}
+    [[ -x "$host_binary" ]] || die "installer did not create $sandbox_binary"
+    write_manifest "$implementation" "$branch" "$worktree" "$session" "$host_binary" "$sandbox_binary"
+
+    previous=$(active_session || true)
+    if [[ -n "$previous" ]]; then
+        stop_session "$previous"
+    fi
+    if ! start_session "$session"; then
+        if [[ -n "$previous" ]] && start_session "$previous"; then
+            write_active_session "$previous"
+            printf 'ait-lab: restored the previous session after the new tray failed\n' >&2
+        fi
+        return 1
+    fi
+    write_active_session "$session"
+
+    printf 'Using %s.\n' "$implementation"
+    printf 'Fake home: %s\n' "$session/home"
+    printf 'Logs: %s\n' "$session/logs"
+}
+
+show_active_session() {
+    local session state="stopped" worktree_state
+
+    if ! session=$(active_session); then
+        printf 'No active lab session.\n'
+        return
+    fi
+    if supervisor_matches_session "$session"; then
+        state="running"
+    fi
+    if [[ -n "$(jq -r '.worktreeStatus' "$session/manifest.json")" ]]; then
+        worktree_state="dirty"
+    else
+        worktree_state="clean"
+    fi
+
+    printf 'Implementation: %s\n' "$(jq -r '.implementation' "$session/manifest.json")"
+    printf 'Branch: %s\n' "$(jq -r '.branch' "$session/manifest.json")"
+    printf 'Revision: %s\n' "$(jq -r '.revision' "$session/manifest.json")"
+    printf 'Worktree: %s\n' "$worktree_state"
+    printf 'Snapshot: %.12s\n' "$(jq -r '.snapshotDigest' "$session/manifest.json")"
+    printf 'Tray: %s\n' "$state"
+    printf 'Session: %s\n' "$session"
+    printf 'Fake home: %s\n' "$session/home"
+    printf 'Logs: %s\n' "$session/logs"
+}
+
+stop_active_session() {
+    local session
+
+    if ! session=$(active_session); then
+        printf 'No active lab session.\n'
+        return
+    fi
+    stop_session "$session"
+    rm -f -- "$AIT_LAB_ACTIVE_FILE"
+    printf 'Stopped %s.\n' "$(jq -r '.implementation' "$session/manifest.json")"
+}
+
+if [[ "${1:-}" == __supervise ]]; then
+    [[ $# -eq 6 ]] || exit 2
+    AIT_LAB_INTERNAL_SESSION=$(validate_session_directory "$2")
+    [[ "$3" == "$(jq -r '.sandboxBinary' "$AIT_LAB_INTERNAL_SESSION/manifest.json")" ]] || exit 2
+    case "$(realpath -m -- "$5")" in
+        "$(realpath -m -- "$AIT_LAB_STATE_ROOT")"/bus/*.sock) ;;
+        *) exit 2 ;;
+    esac
+    [[ "$6" == "unix:path=/lab/bus/$(basename -- "$5")" ]] || exit 2
+    exec >> "$AIT_LAB_INTERNAL_SESSION/logs/supervisor.log" 2>&1
+    supervise_session "$AIT_LAB_INTERNAL_SESSION" "$3" "$4" "$5" "$6"
+    exit $?
+fi
+
+case "${1:-}" in
+    use)
+        [[ $# -eq 2 ]] || { usage >&2; exit 2; }
+        use_implementation "$2"
+        ;;
+    app)
+        [[ $# -ge 2 ]] || { usage >&2; exit 2; }
+        shift
+        run_active_app "$@"
+        ;;
+    statusline)
+        [[ $# -eq 2 ]] || { usage >&2; exit 2; }
+        run_statusline_fixture "$2"
+        ;;
+    claude)
+        [[ $# -eq 1 ]] || { usage >&2; exit 2; }
+        launch_claude
+        ;;
+    show)
+        [[ $# -eq 1 ]] || { usage >&2; exit 2; }
+        show_active_session
+        ;;
+    stop)
+        [[ $# -eq 1 ]] || { usage >&2; exit 2; }
+        stop_active_session
+        ;;
+    -h|--help)
+        usage
+        ;;
+    *)
+        usage >&2
+        exit 2
+        ;;
+esac

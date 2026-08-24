@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+printf 'kbuildsycoca stub: %s\n' "$*" >> "${AIT_LAB_STUB_LOG:?}"
