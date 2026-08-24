@@ -1,0 +1,15 @@
+{
+  "cwd": "/lab/session/project",
+  "workspace": {
+    "current_dir": "/lab/session/project"
+  },
+  "model": {
+    "display_name": "Lab"
+  },
+  "context_window": {
+    "used_percentage": 12
+  },
+  "vim": {
+    "mode": "NORMAL"
+  }
+}
