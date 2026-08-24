@@ -1,6 +1,8 @@
+mod desktop_notification;
 mod instruction_state;
+mod tray;
 
-use std::process::{Command, ExitCode, Stdio};
+use std::process::ExitCode;
 
 use instruction_state::Action;
 
@@ -48,10 +50,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
                 Err(error) => {
                     let error = error.to_string();
                     if notify {
-                        send_notification(
-                            "Agent instructions unchanged",
-                            &format!("Could not change global instructions: {error}"),
-                        );
+                        desktop_notification::failure(&error);
                     }
                     return Err(error);
                 }
@@ -64,10 +63,11 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
             print_inspection(&result.inspection, false);
             print_inspection_warnings(&result.inspection);
             if notify {
-                notify_transition(&result);
+                desktop_notification::transition(&result);
             }
             Ok(())
         }
+        "tray" if args.next().is_none() => tray::run(),
         _ => Err(usage()),
     }
 }
@@ -95,51 +95,7 @@ fn print_inspection_warnings(inspection: &instruction_state::Inspection) {
     }
 }
 
-fn notify_transition(result: &instruction_state::ApplyResult) {
-    let (title, message) = if result.recovered_mixed_state {
-        (
-            "Agent instructions recovered",
-            "Mixed instruction state was restored to on. Press the shortcut again to disable global instructions for new contexts.",
-        )
-    } else {
-        match result.inspection.state {
-            instruction_state::InstructionState::On => (
-                "Agent instructions enabled",
-                "New coding-agent contexts will include global instructions.",
-            ),
-            instruction_state::InstructionState::Off => (
-                "Agent instructions disabled",
-                "New coding-agent contexts will start without global instructions.",
-            ),
-            instruction_state::InstructionState::Mixed
-            | instruction_state::InstructionState::Conflict => return,
-        }
-    };
-    let mut body = message.to_owned();
-    if !result.inspection.missing_targets.is_empty() {
-        body.push_str(" Missing managed targets: ");
-        body.push_str(&result.inspection.missing_targets.join(", "));
-        body.push('.');
-    }
-
-    send_notification(title, &body);
-}
-
-fn send_notification(title: &str, body: &str) {
-    let _ = Command::new("notify-send")
-        .args([
-            "--app-name=Agent Instructions",
-            "--icon=preferences-system",
-            title,
-            body,
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-}
-
 fn usage() -> String {
-    "usage: agent-instructions status [--machine] | (enable | disable | toggle) [--notify]"
+    "usage: agent-instructions status [--machine] | (enable | disable | toggle) [--notify] | tray"
         .to_owned()
 }

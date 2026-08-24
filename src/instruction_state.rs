@@ -50,11 +50,19 @@ impl fmt::Display for InstructionState {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Inspection {
     pub state: InstructionState,
     pub missing_targets: Vec<String>,
     pub collision_targets: Vec<String>,
+    pub watch_locations: WatchLocations,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WatchLocations {
+    pub home_directory: PathBuf,
+    pub profile_directories: Vec<PathBuf>,
+    pub instruction_paths: Vec<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -124,6 +132,7 @@ pub fn apply(action: Action) -> Result<ApplyResult, Error> {
             state: desired_state,
             missing_targets: snapshot.inspection.missing_targets,
             collision_targets: Vec::new(),
+            watch_locations: snapshot.inspection.watch_locations,
         },
         recovered_mixed_state,
     })
@@ -167,6 +176,18 @@ fn inspect_at(home: &Path) -> Result<Snapshot, Error> {
             state,
             missing_targets,
             collision_targets,
+            watch_locations: WatchLocations {
+                home_directory: home.to_owned(),
+                profile_directories: targets
+                    .iter()
+                    .filter(|(target, _)| target.directory.is_dir())
+                    .map(|(target, _)| target.directory.clone())
+                    .collect(),
+                instruction_paths: targets
+                    .iter()
+                    .flat_map(|(target, _)| [target.enabled_path(), target.disabled_path()])
+                    .collect(),
+            },
         },
         targets,
     })

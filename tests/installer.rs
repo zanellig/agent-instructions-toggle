@@ -91,6 +91,10 @@ impl TestInstall {
     fn kglobalaccel_entry(&self) -> PathBuf {
         self.data_home.join("kglobalaccel").join(DESKTOP_FILE)
     }
+
+    fn autostart_entry(&self) -> PathBuf {
+        self.data_home.join("autostart").join(DESKTOP_FILE)
+    }
 }
 
 impl Drop for TestInstall {
@@ -154,6 +158,13 @@ fn installer_copies_release_binary_and_registers_the_plasma_shortcut_idempotentl
     );
     validate_desktop_entry(&install.application_entry());
     validate_desktop_entry(&install.kglobalaccel_entry());
+    let autostart_entry = fs::read_to_string(install.autostart_entry()).unwrap();
+    assert!(
+        autostart_entry.contains(&format!("Exec=\"{}\" tray", installed_binary.display())),
+        "{autostart_entry}"
+    );
+    assert!(autostart_entry.contains("Name=Agent Instructions Tray"));
+    validate_desktop_entry(&install.autostart_entry());
     assert_eq!(
         fs::read_to_string(&unrelated_application).unwrap(),
         "keep application\n"
@@ -192,6 +203,7 @@ fn uninstaller_removes_only_owned_artifacts_and_refreshes_plasma_metadata() {
     assert!(!install.bin_home.join("agent-instructions").exists());
     assert!(!install.application_entry().exists());
     assert!(!install.kglobalaccel_entry().exists());
+    assert!(!install.autostart_entry().exists());
     assert_eq!(
         fs::read_to_string(&unrelated_application).unwrap(),
         "keep application\n"

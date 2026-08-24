@@ -25,6 +25,7 @@ done
 readonly binary_path="${bin_directory}/agent-instructions"
 readonly application_entry="${data_directory}/applications/${desktop_filename}"
 readonly kglobalaccel_entry="${data_directory}/kglobalaccel/${desktop_filename}"
+readonly autostart_entry="${data_directory}/autostart/${desktop_filename}"
 
 refresh_desktop_metadata() {
     local refresher
@@ -46,7 +47,7 @@ if [[ "${1:-}" == "--uninstall" ]]; then
         printf 'usage: %s [--uninstall]\n' "$0" >&2
         exit 1
     fi
-    rm -f -- "$binary_path" "$application_entry" "$kglobalaccel_entry"
+    rm -f -- "$binary_path" "$application_entry" "$kglobalaccel_entry" "$autostart_entry"
     refresh_desktop_metadata
     printf 'Removed agent-instructions desktop integration.\n'
     exit 0
@@ -80,7 +81,8 @@ escaped_binary=${escaped_binary//\$/\\\$}
 escaped_binary=${escaped_binary//\`/\\\`}
 
 desktop_entry=$(mktemp)
-trap 'rm -f -- "$desktop_entry"' EXIT
+autostart_desktop_entry=$(mktemp)
+trap 'rm -f -- "$desktop_entry" "$autostart_desktop_entry"' EXIT
 printf '%s\n' \
     '[Desktop Entry]' \
     'Type=Application' \
@@ -94,9 +96,23 @@ printf '%s\n' \
     'X-KDE-Shortcuts=Meta+Ctrl+Shift+A' \
     > "$desktop_entry"
 
+printf '%s\n' \
+    '[Desktop Entry]' \
+    'Type=Application' \
+    'Name=Agent Instructions Tray' \
+    'Comment=Show global instruction document state' \
+    "Exec=\"${escaped_binary}\" tray" \
+    'Icon=preferences-system' \
+    'Terminal=false' \
+    'NoDisplay=true' \
+    'X-GNOME-Autostart-enabled=true' \
+    > "$autostart_desktop_entry"
+
 install -Dm644 -- "$desktop_entry" "$application_entry"
 install -Dm644 -- "$desktop_entry" "$kglobalaccel_entry"
+install -Dm644 -- "$autostart_desktop_entry" "$autostart_entry"
 refresh_desktop_metadata
 
 printf 'Installed %s\n' "$binary_path"
 printf 'Registered Plasma shortcut Meta+Ctrl+Shift+A\n'
+printf 'Installed tray autostart entry\n'

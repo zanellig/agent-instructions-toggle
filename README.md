@@ -19,6 +19,7 @@ agent-instructions enable
 agent-instructions disable
 agent-instructions toggle
 agent-instructions toggle --notify
+agent-instructions tray
 ```
 
 `status` prints the aggregate instruction state and exits successfully for every observable state. `status --machine` prints only `on`, `off`, `mixed`, or `conflict` to standard output. Missing-target and collision details go to standard error, so command substitution receives one token.
@@ -42,6 +43,16 @@ A mutation requested from `mixed` performs conservative recovery: it restores al
 
 Changes apply only when a coding agent creates a new context. Existing Codex, T3 Code, and Claude Code contexts retain the instructions they already loaded.
 
+## Tray indicator
+
+`agent-instructions tray` runs a windowless status indicator. Only one tray process runs per user session. Quitting it stops the indicator only; the installed CLI and Plasma shortcut remain available.
+
+The icon is green for `on`, gray for `off`, amber for `mixed`, and red for `conflict`. Its tooltip begins with `AGENTS: <state>` and lists missing or conflicting targets on following lines. A missing target also adds an amber warning overlay without replacing the state color.
+
+Primary activation opens the menu. Enable and Disable make an explicit instruction-state request, Status reports the current state, and Quit stops the tray. The tray watches the home directory for Codex profile additions and removals and watches active profile directories for instruction-document changes. Updates use native filesystem events. The tray does not poll or rename files automatically.
+
+Plasma may initially put the indicator in the tray overflow. To keep it visible, open **Configure System Tray**, select **Entries**, find **Agent Instructions**, set its visibility to **Always shown**, and apply the change.
+
 ## KDE Plasma shortcut
 
 Install the release binary and the Plasma shortcut for the current user:
@@ -50,9 +61,9 @@ Install the release binary and the Plasma shortcut for the current user:
 ./install.sh
 ```
 
-The installer runs `cargo build --release --locked`, then copies the binary to `${XDG_BIN_HOME:-$HOME/.local/bin}/agent-instructions`. It does not create a link to this checkout. It installs the same project-owned desktop entry under `${XDG_DATA_HOME:-$HOME/.local/share}/applications` and `kglobalaccel`, with `Meta+Ctrl+Shift+A` registered through `X-KDE-Shortcuts`. Finally, it runs `kbuildsycoca6`, or `kbuildsycoca5` on Plasma 5, to refresh desktop service metadata. It does not edit `kglobalshortcutsrc` or restart KGlobalAccel.
+The installer runs `cargo build --release --locked`, then copies the binary to `${XDG_BIN_HOME:-$HOME/.local/bin}/agent-instructions`. It does not create a link to this checkout. It installs the same project-owned desktop entry under `${XDG_DATA_HOME:-$HOME/.local/share}/applications` and `kglobalaccel`, with `Meta+Ctrl+Shift+A` registered through `X-KDE-Shortcuts`. It also installs an XDG autostart entry under `autostart` so the tray starts at login. Finally, it runs `kbuildsycoca6`, or `kbuildsycoca5` on Plasma 5, to refresh desktop service metadata. It does not edit `kglobalshortcutsrc` or restart KGlobalAccel.
 
-Re-run `./install.sh` after updating the checkout. The installer replaces only the copied binary and the two `io.github.zanellig.agent-instructions.desktop` files. Other files in those directories remain untouched.
+Re-run `./install.sh` after updating the checkout. The installer replaces only the copied binary and its three `io.github.zanellig.agent-instructions.desktop` files. Other files in those directories remain untouched.
 
 Press `Meta+Ctrl+Shift+A`, then inspect the resulting state:
 
@@ -77,7 +88,7 @@ qdbus6 org.kde.kglobalaccel /kglobalaccel \
 
 The first command prints `_launch`. The second includes the active and default shortcut values. The last command asks which action owns the Qt key value for `Meta+Ctrl+Shift+A`; it should print the desktop entry ID followed by `_launch`.
 
-Remove the copied binary and both desktop entries safely, then refresh Plasma metadata:
+Remove the copied binary, shortcut entries, and tray autostart entry safely, then refresh Plasma metadata:
 
 ```sh
 ./install.sh --uninstall
