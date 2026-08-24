@@ -40,6 +40,15 @@ implementation_branch() {
     esac
 }
 
+implementation_directory() {
+    case "$1" in
+        claude) printf 'implementations/claude\n' ;;
+        codex-nc) printf 'implementations/codex-nc\n' ;;
+        codex-fc) printf 'implementations/codex-fc\n' ;;
+        *) die "unknown implementation '$1'; expected claude, codex-nc, or codex-fc" ;;
+    esac
+}
+
 implementation_override() {
     case "$1" in
         claude) printf '%s' "${AIT_LAB_WORKTREE_CLAUDE:-}" ;;
@@ -48,28 +57,34 @@ implementation_override() {
     esac
 }
 
-discover_worktree() {
+resolve_source() {
     local implementation=$1
-    local branch override worktree
+    local branch directory label override source
 
     branch=$(implementation_branch "$implementation")
+    directory=$(implementation_directory "$implementation")
     override=$(implementation_override "$implementation")
     if [[ -n "$override" ]]; then
-        worktree=$override
+        source=$override
+        label=$override
+    elif [[ -d "$AIT_LAB_PROJECT_ROOT/$directory" ]]; then
+        source="$AIT_LAB_PROJECT_ROOT/$directory"
+        label=$directory
     else
-        worktree=$(git -C "$AIT_LAB_PROJECT_ROOT" worktree list --porcelain | awk \
+        source=$(git -C "$AIT_LAB_PROJECT_ROOT" worktree list --porcelain | awk \
             -v expected="refs/heads/$branch" '
                 /^worktree / { path = substr($0, 10) }
                 /^branch / && substr($0, 8) == expected { print path; exit }
             ')
+        label="branch:$branch"
     fi
 
-    [[ -n "$worktree" ]] || die "no worktree has branch $branch"
-    [[ -d "$worktree" ]] || die "worktree does not exist: $worktree"
-    worktree=$(realpath -e -- "$worktree")
-    [[ -f "$worktree/Cargo.toml" ]] || die "worktree has no Cargo.toml: $worktree"
-    [[ -f "$worktree/install.sh" ]] || die "worktree has no install.sh: $worktree"
-    printf '%s\n' "$worktree"
+    [[ -n "$source" ]] || die "implementation source is unavailable: $implementation"
+    [[ -d "$source" ]] || die "implementation source does not exist: $source"
+    source=$(realpath -e -- "$source")
+    [[ -f "$source/Cargo.toml" ]] || die "implementation source has no Cargo.toml: $source"
+    [[ -f "$source/install.sh" ]] || die "implementation source has no install.sh: $source"
+    printf '%s\n%s\n' "$source" "$label"
 }
 
 validate_session_directory() {
@@ -136,18 +151,18 @@ seed_session() {
 }
 
 snapshot_source() {
-    local worktree=$1
+    local source=$1
     local session=$2
 
-    if git -C "$worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        git -C "$worktree" ls-files -co --exclude-standard -z | while IFS= read -r -d '' path; do
-            if [[ -e "$worktree/$path" || -L "$worktree/$path" ]]; then
+    if git -C "$source" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        git -C "$source" ls-files -co --exclude-standard -z | while IFS= read -r -d '' path; do
+            if [[ -e "$source/$path" || -L "$source/$path" ]]; then
                 printf '%s\0' "$path"
             fi
-        done | tar -C "$worktree" --null --files-from=- -cf - \
+        done | tar -C "$source" --null --files-from=- -cf - \
             | tar -C "$session/source" -xf -
     else
-        tar -C "$worktree" \
+        tar -C "$source" \
             --exclude='./.git' \
             --exclude='./target' \
             -cf - . | tar -C "$session/source" -xf -
@@ -250,18 +265,18 @@ installed_binary_paths() {
 
 write_manifest() {
     local implementation=$1
-    local branch=$2
-    local worktree=$3
+    local source=$2
+    local source_label=$3
     local session=$4
     local host_binary=$5
     local sandbox_binary=$6
     local revision="fixture"
-    local worktree_status=""
+    local source_status=""
     local snapshot_digest
 
-    if git -C "$worktree" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        revision=$(git -C "$worktree" rev-parse HEAD)
-        worktree_status=$(git -C "$worktree" status --short)
+    if git -C "$source" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        revision=$(git -C "$source" rev-parse HEAD)
+        source_status=$(git -C "$source" status --short)
     fi
     snapshot_digest=$(tar -C "$session/source" \
         --sort=name \
@@ -274,10 +289,10 @@ write_manifest() {
 
     jq -n \
         --arg implementation "$implementation" \
-        --arg branch "$branch" \
-        --arg worktree "$worktree" \
+        --arg source "$source_label" \
+        --arg sourcePath "$source" \
         --arg revision "$revision" \
-        --arg worktreeStatus "$worktree_status" \
+        --arg sourceStatus "$source_status" \
         --arg snapshotDigest "$snapshot_digest" \
         --arg session "$session" \
         --arg hostBinary "$host_binary" \
@@ -285,10 +300,10 @@ write_manifest() {
         --arg createdAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         '{
             implementation: $implementation,
-            branch: $branch,
-            worktree: $worktree,
+            source: $source,
+            sourcePath: $sourcePath,
             revision: $revision,
-            worktreeStatus: $worktreeStatus,
+            sourceStatus: $sourceStatus,
             snapshotDigest: $snapshotDigest,
             session: $session,
             hostBinary: $hostBinary,
@@ -557,16 +572,18 @@ stop_session() {
 
 use_implementation() {
     local implementation=$1
-    local branch worktree session_id session build_target cargo_cache rust_toolchain
+    local source source_label session_id session build_target cargo_cache rust_toolchain
     local host_binary sandbox_binary previous=""
-    local -a binary_paths
+    local -a binary_paths source_details
 
     require_command bwrap
     require_command jq
     require_command sha256sum
     require_command tar
-    branch=$(implementation_branch "$implementation")
-    worktree=$(discover_worktree "$implementation")
+    mapfile -t source_details < <(resolve_source "$implementation")
+    ((${#source_details[@]} == 2)) || die "failed to resolve implementation source: $implementation"
+    source=${source_details[0]}
+    source_label=${source_details[1]}
     session_id="$(date -u +%Y%m%dT%H%M%SZ)-$$-$implementation"
     session="$AIT_LAB_STATE_ROOT/sessions/$session_id"
     build_target="$AIT_LAB_STATE_ROOT/builds/$implementation/target"
@@ -576,10 +593,10 @@ use_implementation() {
     umask 077
     mkdir -p -- "$session" "$build_target" "$cargo_cache"
     seed_session "$session"
-    snapshot_source "$worktree" "$session"
+    snapshot_source "$source" "$session"
     ln -s /lab/build-target "$session/source/target"
 
-    printf 'Preparing %s from %s...\n' "$implementation" "$branch"
+    printf 'Preparing %s from %s...\n' "$implementation" "$source_label"
     if ! run_build_and_install "$implementation" "$session" "$build_target" "$cargo_cache" "$rust_toolchain" \
         > "$session/logs/build-install.log" 2>&1; then
         printf 'ait-lab: build or install failed; see %s\n' "$session/logs/build-install.log" >&2
@@ -591,7 +608,7 @@ use_implementation() {
     host_binary=${binary_paths[0]}
     sandbox_binary=${binary_paths[1]}
     [[ -x "$host_binary" ]] || die "installer did not create $sandbox_binary"
-    write_manifest "$implementation" "$branch" "$worktree" "$session" "$host_binary" "$sandbox_binary"
+    write_manifest "$implementation" "$source" "$source_label" "$session" "$host_binary" "$sandbox_binary"
 
     previous=$(active_session || true)
     if [[ -n "$previous" ]]; then
@@ -612,7 +629,7 @@ use_implementation() {
 }
 
 show_active_session() {
-    local session state="stopped" worktree_state
+    local session source_status source_state state="stopped"
 
     if ! session=$(active_session); then
         printf 'No active lab session.\n'
@@ -621,16 +638,17 @@ show_active_session() {
     if supervisor_matches_session "$session"; then
         state="running"
     fi
-    if [[ -n "$(jq -r '.worktreeStatus' "$session/manifest.json")" ]]; then
-        worktree_state="dirty"
+    source_status=$(jq -r '.sourceStatus // .worktreeStatus // ""' "$session/manifest.json")
+    if [[ -n "$source_status" ]]; then
+        source_state="dirty"
     else
-        worktree_state="clean"
+        source_state="clean"
     fi
 
     printf 'Implementation: %s\n' "$(jq -r '.implementation' "$session/manifest.json")"
-    printf 'Branch: %s\n' "$(jq -r '.branch' "$session/manifest.json")"
+    printf 'Source: %s\n' "$(jq -r '.source // .branch' "$session/manifest.json")"
     printf 'Revision: %s\n' "$(jq -r '.revision' "$session/manifest.json")"
-    printf 'Worktree: %s\n' "$worktree_state"
+    printf 'Source tree: %s\n' "$source_state"
     printf 'Snapshot: %.12s\n' "$(jq -r '.snapshotDigest' "$session/manifest.json")"
     printf 'Tray: %s\n' "$state"
     printf 'Session: %s\n' "$session"
