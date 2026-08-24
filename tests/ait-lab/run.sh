@@ -7,8 +7,15 @@ readonly LAB="$TEST_ROOT/ait-lab"
 readonly TEST_TEMP=$(mktemp -d)
 readonly TEST_STATE="$TEST_TEMP/playground/agent-instructions-toggle-with-a-deliberately-long-checkout-name-for-unix-socket-regression/.ait-lab-state"
 readonly TEST_RUNTIME="$TEST_TEMP/runtime"
+readonly TEST_HOST_DATA="$TEST_TEMP/host-data"
+readonly TEST_HOST_DESKTOP="$TEST_HOST_DATA/applications/ait-lab-agent-instructions-toggle.desktop"
+readonly TEST_HOST_REFRESH_LOG="$TEST_TEMP/host-refresh.log"
+readonly TEST_KGLOBALACCEL_LOG="$TEST_TEMP/kglobalaccel.log"
+readonly TEST_KGLOBALACCEL_OWNER="$TEST_TEMP/kglobalaccel-owner"
 readonly FAKE_CANDIDATE="$TEST_ROOT/tests/ait-lab/fake-candidate"
 readonly FAKE_CLAUDE="$TEST_ROOT/tests/ait-lab/fake-claude"
+readonly FAKE_KGLOBALACCEL="$TEST_ROOT/tests/ait-lab/fake-kglobalaccel"
+readonly FAKE_HOST_REFRESH="$TEST_ROOT/tests/ait-lab/stubs/kbuildsycoca"
 LAB_BUS_PID=""
 LAB_BUS_ADDRESS=""
 
@@ -80,6 +87,12 @@ run_lab() {
     AIT_LAB_SOURCE_CODEX_FC="$FAKE_CANDIDATE" \
     AIT_LAB_CLAUDE_EXECUTABLE="$FAKE_CLAUDE" \
     AIT_LAB_SESSION_BUS_ADDRESS="$LAB_BUS_ADDRESS" \
+    AIT_LAB_HOST_DATA_HOME="$TEST_HOST_DATA" \
+    AIT_LAB_QDBUS="$FAKE_KGLOBALACCEL" \
+    AIT_LAB_KBUILDSYCOCA="$FAKE_HOST_REFRESH" \
+    AIT_LAB_STUB_LOG="$TEST_HOST_REFRESH_LOG" \
+    AIT_LAB_FAKE_KGLOBALACCEL_LOG="$TEST_KGLOBALACCEL_LOG" \
+    AIT_LAB_FAKE_KGLOBALACCEL_OWNER_FILE="$TEST_KGLOBALACCEL_OWNER" \
         "$LAB" "$@"
 }
 
@@ -166,6 +179,7 @@ test_use_starts_an_isolated_candidate() {
 
     output=$(run_lab use claude)
     assert_contains "Using claude" "$output" "use should report the selected implementation"
+    [[ ! -e "$TEST_HOST_DESKTOP" ]] || fail "default use registered a host shortcut"
 
     output=$(run_lab show)
     assert_contains "Implementation: claude" "$output" "show should name the active implementation"
@@ -177,7 +191,7 @@ test_use_starts_an_isolated_candidate() {
     output=$(run_lab statusline normal)
     assert_contains "BASE AGENTS:on" "$output" "statusline should run the command installed into the fake Claude profile"
 
-    run_lab app toggle --notify
+    run_lab app toggle --notify >/dev/null
     output=$(run_lab statusline normal)
     assert_contains "BASE AGENTS:off" "$output" "statusline should observe instruction-state changes"
 
@@ -223,6 +237,69 @@ test_use_starts_an_isolated_candidate() {
     assert_equal "No active lab session." "$output" "stop should clear the active session"
 }
 
+test_plasma_shortcut_registration() {
+    local output shortcut_status
+
+    mkdir -p "$(dirname -- "$TEST_HOST_DESKTOP")"
+    printf '[Desktop Entry]\nName=Not owned by the lab\n' > "$TEST_HOST_DESKTOP"
+    output=$(run_lab use claude)
+    assert_contains "Using claude" "$output" "default use should ignore unrelated host shortcut files"
+    [[ -f "$TEST_HOST_DESKTOP" ]] || fail "default use removed an unrelated host desktop entry"
+    run_lab stop >/dev/null
+    [[ -f "$TEST_HOST_DESKTOP" ]] || fail "stop removed an unrelated host desktop entry"
+    set +e
+    output=$(run_lab use claude --plasma-shortcut 2>&1)
+    shortcut_status=$?
+    set -e
+    assert_equal "1" "$shortcut_status" "use should reject a host desktop-file ownership conflict"
+    assert_contains "will not overwrite" "$output" "use should explain the host desktop-file conflict"
+    rm -f -- "$TEST_HOST_DESKTOP"
+
+    printf '%s\n' org.example.existing.desktop _launch Existing 'Existing shortcut' > "$TEST_KGLOBALACCEL_OWNER"
+    set +e
+    output=$(run_lab use claude --plasma-shortcut 2>&1)
+    shortcut_status=$?
+    set -e
+    assert_equal "1" "$shortcut_status" "use should reject a live shortcut conflict"
+    assert_contains "already belongs to Existing" "$output" "use should name the conflicting shortcut owner"
+    rm -f -- "$TEST_KGLOBALACCEL_OWNER"
+
+    output=$(run_lab use claude --plasma-shortcut)
+    assert_contains "Plasma shortcut: registered" "$output" "use should report host shortcut registration"
+    [[ -f "$TEST_HOST_DESKTOP" ]] || fail "use did not create the host desktop entry"
+    output=$(<"$TEST_HOST_DESKTOP")
+    assert_contains "X-KDE-Shortcuts=Meta+Ctrl+Shift+A" "$output" "host desktop entry should register the candidate shortcut"
+    assert_contains "X-AIT-Lab-Project=$TEST_ROOT" "$output" "host desktop entry should record its owner"
+    output=$(run_lab show)
+    assert_contains "Plasma shortcut: registered" "$output" "show should report host shortcut registration"
+    output=$(run_lab shortcut)
+    assert_contains "notification: requested" "$output" "the claude shortcut should request a notification"
+    output=$(run_lab app status)
+    assert_equal "off" "$output" "the host shortcut bridge should toggle the active candidate"
+
+    run_lab use codex-nc --plasma-shortcut >/dev/null
+    output=$(run_lab shortcut)
+    assert_contains "notification: implicit" "$output" "the codex-nc shortcut should use its implicit notification"
+
+    run_lab use codex-fc --plasma-shortcut >/dev/null
+    output=$(run_lab shortcut)
+    assert_contains "notification: requested" "$output" "the codex-fc shortcut should request a notification"
+
+    run_lab use claude >/dev/null
+    [[ ! -e "$TEST_HOST_DESKTOP" ]] || fail "switching without the option left the host desktop entry installed"
+    output=$(run_lab show)
+    assert_contains "Plasma shortcut: disabled" "$output" "show should report that host shortcut registration is disabled"
+
+    run_lab use codex-nc --plasma-shortcut >/dev/null
+    run_lab stop >/dev/null
+    [[ ! -e "$TEST_HOST_DESKTOP" ]] || fail "stop left the host desktop entry installed"
+    output=$(<"$TEST_KGLOBALACCEL_LOG")
+    assert_contains "unregister ait-lab-agent-instructions-toggle.desktop _launch" "$output" "cleanup should unregister the KGlobalAccel action"
+    output=$(<"$TEST_HOST_REFRESH_LOG")
+    assert_contains "--noincremental" "$output" "registration and cleanup should refresh host desktop metadata"
+}
+
 test_show_reports_no_active_session
 test_use_starts_an_isolated_candidate
+test_plasma_shortcut_registration
 printf 'PASS: ait-lab interface tests\n'

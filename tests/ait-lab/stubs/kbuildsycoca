@@ -2,3 +2,18 @@
 
 set -euo pipefail
 printf 'kbuildsycoca stub: %s\n' "$*" >> "${AIT_LAB_STUB_LOG:?}"
+
+if [[ -n "${AIT_LAB_FAKE_KGLOBALACCEL_OWNER_FILE:-}" \
+    && -n "${AIT_LAB_HOST_DATA_HOME:-}" ]]; then
+    desktop="$AIT_LAB_HOST_DATA_HOME/applications/ait-lab-agent-instructions-toggle.desktop"
+    if [[ -f "$desktop" ]]; then
+        printf '%s\n' \
+            ait-lab-agent-instructions-toggle.desktop \
+            _launch \
+            'Implementation lab' \
+            'Toggle agent instructions' \
+            > "$AIT_LAB_FAKE_KGLOBALACCEL_OWNER_FILE"
+    else
+        rm -f -- "$AIT_LAB_FAKE_KGLOBALACCEL_OWNER_FILE"
+    fi
+fi

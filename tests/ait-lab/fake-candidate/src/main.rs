@@ -40,16 +40,47 @@ fn write_claude_profiles() {
     }
 }
 
+fn implementation() -> String {
+    let root = PathBuf::from(env::var_os("HOME").expect("HOME is set"));
+    fs::read_to_string(root.join(".ait-lab-implementation"))
+        .expect("the installer records the fake implementation")
+        .trim()
+        .to_owned()
+}
+
+fn mutation_notification(args: &[String]) -> Option<&'static str> {
+    if implementation() == "codex-nc" {
+        (args.len() == 1).then_some("notification: implicit")
+    } else {
+        match args.get(1).map(String::as_str) {
+            None => Some(""),
+            Some("--notify") if args.len() == 2 => Some("notification: requested"),
+            _ => None,
+        }
+    }
+}
+
 fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     match args.first().map(String::as_str) {
         Some("status") => println!("{}", state()),
-        Some("disable") => move_document(&profile_document(), &disabled_document()),
-        Some("enable") => move_document(&disabled_document(), &profile_document()),
-        Some("toggle") if state() == "on" => {
-            move_document(&profile_document(), &disabled_document())
+        Some("disable" | "enable" | "toggle") => {
+            let Some(notification) = mutation_notification(&args) else {
+                std::process::exit(2);
+            };
+            match args[0].as_str() {
+                "disable" => move_document(&profile_document(), &disabled_document()),
+                "enable" => move_document(&disabled_document(), &profile_document()),
+                "toggle" if state() == "on" => {
+                    move_document(&profile_document(), &disabled_document())
+                }
+                "toggle" => move_document(&disabled_document(), &profile_document()),
+                _ => unreachable!(),
+            }
+            if !notification.is_empty() {
+                println!("{notification}");
+            }
         }
-        Some("toggle") => move_document(&disabled_document(), &profile_document()),
         Some("probe-write") => match args
             .get(1)
             .map(|path| fs::write(path, b"probe"))

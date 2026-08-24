@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly log=${AIT_LAB_FAKE_KGLOBALACCEL_LOG:?}
+readonly owner_file=${AIT_LAB_FAKE_KGLOBALACCEL_OWNER_FILE:?}
+readonly method=${3:-}
+
+case "$method" in
+    org.kde.KGlobalAccel.action)
+        printf 'action %s\n' "${4:-}" >> "$log"
+        [[ ! -s "$owner_file" ]] || cat -- "$owner_file"
+        ;;
+    org.kde.KGlobalAccel.unregister)
+        printf 'unregister %s %s\n' "${4:-}" "${5:-}" >> "$log"
+        rm -f -- "$owner_file"
+        printf 'true\n'
+        ;;
+    *)
+        printf 'unexpected KGlobalAccel method: %s\n' "$method" >&2
+        exit 2
+        ;;
+esac
