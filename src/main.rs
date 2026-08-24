@@ -1,6 +1,6 @@
 mod instruction_state;
 
-use std::process::ExitCode;
+use std::process::{Command, ExitCode, Stdio};
 
 use instruction_state::Action;
 
@@ -32,16 +32,30 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
             Ok(())
         }
         "enable" | "disable" | "toggle" => {
-            if args.next().is_some() {
-                return Err(usage());
-            }
+            let notify = match args.next().as_deref() {
+                None => false,
+                Some("--notify") if args.next().is_none() => true,
+                _ => return Err(usage()),
+            };
             let action = match command.as_str() {
                 "enable" => Action::Enable,
                 "disable" => Action::Disable,
                 "toggle" => Action::Toggle,
                 _ => unreachable!(),
             };
-            let result = instruction_state::apply(action).map_err(|error| error.to_string())?;
+            let result = match instruction_state::apply(action) {
+                Ok(result) => result,
+                Err(error) => {
+                    let error = error.to_string();
+                    if notify {
+                        send_notification(
+                            "Agent instructions unchanged",
+                            &format!("Could not change global instructions: {error}"),
+                        );
+                    }
+                    return Err(error);
+                }
+            };
             if result.recovered_mixed_state {
                 println!(
                     "Recovered mixed instruction state to on; requested action was not applied."
@@ -49,6 +63,9 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
             }
             print_inspection(&result.inspection, false);
             print_inspection_warnings(&result.inspection);
+            if notify {
+                notify_transition(&result);
+            }
             Ok(())
         }
         _ => Err(usage()),
@@ -78,6 +95,51 @@ fn print_inspection_warnings(inspection: &instruction_state::Inspection) {
     }
 }
 
+fn notify_transition(result: &instruction_state::ApplyResult) {
+    let (title, message) = if result.recovered_mixed_state {
+        (
+            "Agent instructions recovered",
+            "Mixed instruction state was restored to on. Press the shortcut again to disable global instructions for new contexts.",
+        )
+    } else {
+        match result.inspection.state {
+            instruction_state::InstructionState::On => (
+                "Agent instructions enabled",
+                "New coding-agent contexts will include global instructions.",
+            ),
+            instruction_state::InstructionState::Off => (
+                "Agent instructions disabled",
+                "New coding-agent contexts will start without global instructions.",
+            ),
+            instruction_state::InstructionState::Mixed
+            | instruction_state::InstructionState::Conflict => return,
+        }
+    };
+    let mut body = message.to_owned();
+    if !result.inspection.missing_targets.is_empty() {
+        body.push_str(" Missing managed targets: ");
+        body.push_str(&result.inspection.missing_targets.join(", "));
+        body.push('.');
+    }
+
+    send_notification(title, &body);
+}
+
+fn send_notification(title: &str, body: &str) {
+    let _ = Command::new("notify-send")
+        .args([
+            "--app-name=Agent Instructions",
+            "--icon=preferences-system",
+            title,
+            body,
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
 fn usage() -> String {
-    "usage: agent-instructions status [--machine] | enable | disable | toggle".to_owned()
+    "usage: agent-instructions status [--machine] | (enable | disable | toggle) [--notify]"
+        .to_owned()
 }
