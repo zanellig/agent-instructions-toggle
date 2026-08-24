@@ -13,7 +13,7 @@ struct TestInstall {
     home: PathBuf,
     bin_home: PathBuf,
     data_home: PathBuf,
-    target: PathBuf,
+    build_directory: PathBuf,
     tools: PathBuf,
     cargo_log: PathBuf,
     metadata_log: PathBuf,
@@ -30,7 +30,7 @@ impl TestInstall {
         let home = root.join("home");
         let bin_home = root.join("user bin");
         let data_home = root.join("user-data");
-        let target = root.join("target");
+        let build_directory = root.join("target");
         let tools = root.join("tools");
         let cargo_log = root.join("cargo.log");
         let metadata_log = root.join("metadata.log");
@@ -43,7 +43,7 @@ impl TestInstall {
         fs::write(
             &cargo,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\nmkdir -p \"$CARGO_TARGET_DIR/release\"\nprintf '%s\\n' '#!/bin/bash' 'if [[ \"$1 $2 $3\" == \"profiles --claude --null\" ]]; then' '  for profile in \"$HOME\"/.claude*; do' '    [[ -d \"$profile\" ]] && printf \"%s\\0\" \"$profile\"' '  done' 'elif [[ \"$1 $2\" == \"status --machine\" ]]; then' '  printf \"%s\\n\" \"${{AGENT_INSTRUCTIONS_TEST_STATE:-on}}\"' '  [[ -n \"${{AGENT_INSTRUCTIONS_TEST_WARNING:-}}\" ]] && printf \"Warning: %s\\n\" \"$AGENT_INSTRUCTIONS_TEST_WARNING\" >&2' 'fi' 'exit 0' > \"$CARGO_TARGET_DIR/release/agent-instructions\"\nchmod 755 \"$CARGO_TARGET_DIR/release/agent-instructions\"\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\nmkdir -p \"$CARGO_TARGET_DIR/release\"\nprintf '%s\\n' '#!/bin/bash' 'if [[ \"$1 $2 $3\" == \"profiles --claude --null\" ]]; then' '  for profile in \"$HOME\"/.claude*; do' '    [[ -d \"$profile\" ]] && printf \"%s\\0\" \"$profile\"' '  done' 'elif [[ \"$1 $2\" == \"status --machine\" ]]; then' '  printf \"%s\\n\" \"${{AGENT_INSTRUCTIONS_TEST_STATE:-on}}\"' 'elif [[ \"$1 $2\" == \"status --segment\" ]]; then' '  case \"${{AGENT_INSTRUCTIONS_TEST_STATE:-on}}\" in' '    on) color=32 ;;' '    off) color=90 ;;' '    mixed) color=33 ;;' '    conflict) color=31 ;;' '  esac' '  printf \"\\033[%smAGENTS:%s\\033[0m\\n\" \"$color\" \"${{AGENT_INSTRUCTIONS_TEST_STATE:-on}}\"' 'fi' 'if [[ \"$1\" == status && -n \"${{AGENT_INSTRUCTIONS_TEST_WARNING:-}}\" ]]; then' '  printf \"Warning: %s\\n\" \"$AGENT_INSTRUCTIONS_TEST_WARNING\" >&2' 'fi' 'exit 0' > \"$CARGO_TARGET_DIR/release/agent-instructions\"\nchmod 755 \"$CARGO_TARGET_DIR/release/agent-instructions\"\n",
                 cargo_log.display(),
             ),
         )
@@ -66,7 +66,7 @@ impl TestInstall {
             home,
             bin_home,
             data_home,
-            target,
+            build_directory,
             tools,
             cargo_log,
             metadata_log,
@@ -81,7 +81,7 @@ impl TestInstall {
             .env("HOME", &self.home)
             .env("XDG_BIN_HOME", &self.bin_home)
             .env("XDG_DATA_HOME", &self.data_home)
-            .env("CARGO_TARGET_DIR", &self.target)
+            .env("CARGO_TARGET_DIR", &self.build_directory)
             .env("CARGO", self.tools.join("cargo"))
             .env("KBUILDSYCOCA", self.tools.join("kbuildsycoca6"))
             .output()
@@ -112,6 +112,35 @@ impl TestInstall {
     fn status_metadata(&self, name: &str) -> PathBuf {
         self.claude_profile(name)
             .join(".agent-instructions-statusline.json")
+    }
+
+    fn command_with_preexisting_temp_symlinks(&self, profile_name: &str, victim: &Path) -> Output {
+        let profile = self.claude_profile(profile_name);
+        let settings = profile.join("settings.json");
+        let metadata = self.status_metadata(profile_name);
+        let wrapper = self.status_wrapper(profile_name);
+        let mut command = Command::new("bash");
+        command
+            .arg("-c")
+            .arg(
+                r#"ln -s -- "$1" "$2.tmp.$$"
+ln -s -- "$1" "$3.tmp.$$"
+ln -s -- "$1" "$4.tmp.$$"
+exec bash "$5""#,
+            )
+            .arg("temp-symlink-test")
+            .arg(victim)
+            .arg(settings)
+            .arg(metadata)
+            .arg(wrapper)
+            .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("install.sh"))
+            .env("HOME", &self.home)
+            .env("XDG_BIN_HOME", &self.bin_home)
+            .env("XDG_DATA_HOME", &self.data_home)
+            .env("CARGO_TARGET_DIR", &self.build_directory)
+            .env("CARGO", self.tools.join("cargo"))
+            .env("KBUILDSYCOCA", self.tools.join("kbuildsycoca6"));
+        command.output().unwrap()
     }
 }
 
@@ -272,6 +301,9 @@ fn installer_extends_and_restores_each_claude_status_line_idempotently() {
     assert!(first.status.success(), "{}", stderr(&first));
     assert!(install.status_wrapper(".claude-work").exists());
     assert!(install.status_metadata(".claude-work").exists());
+    let wrapper_contents = fs::read_to_string(install.status_wrapper(".claude-work")).unwrap();
+    assert!(wrapper_contents.contains("status --segment"));
+    assert!(!wrapper_contents.contains("case \"$state\""));
     let installed_settings = fs::read_to_string(&settings).unwrap();
     assert!(installed_settings.contains("\"theme\": \"dark\""));
     assert!(installed_settings.contains("agent-instructions-statusline.sh"));
@@ -320,6 +352,35 @@ fn installer_extends_and_restores_each_claude_status_line_idempotently() {
     assert!(restored_settings.contains(&existing_status.display().to_string()));
     assert!(restored_settings.contains("\"padding\": 2"));
     assert!(restored_settings.contains("\"theme\": \"dark\""));
+}
+
+#[test]
+fn installer_uses_secure_sibling_temporary_files() {
+    let install = TestInstall::new();
+    let profile = install.claude_profile(".claude");
+    fs::create_dir_all(&profile).unwrap();
+    let victim = install.root.join("must-not-change");
+    fs::write(&victim, "sentinel\n").unwrap();
+
+    let installed = install.command_with_preexisting_temp_symlinks(".claude", &victim);
+
+    assert!(installed.status.success(), "{}", stderr(&installed));
+    assert_eq!(fs::read_to_string(&victim).unwrap(), "sentinel\n");
+    for installed_file in [
+        profile.join("settings.json"),
+        install.status_metadata(".claude"),
+        install.status_wrapper(".claude"),
+    ] {
+        assert!(installed_file.is_file(), "{}", installed_file.display());
+        assert!(
+            !fs::symlink_metadata(&installed_file)
+                .unwrap()
+                .file_type()
+                .is_symlink(),
+            "{}",
+            installed_file.display()
+        );
+    }
 }
 
 #[test]
@@ -404,6 +465,33 @@ fn uninstaller_preserves_a_status_command_changed_after_installation() {
     );
     assert!(!install.status_wrapper(".claude").exists());
     assert!(!install.status_metadata(".claude").exists());
+}
+
+#[test]
+fn uninstaller_refuses_metadata_that_does_not_match_the_install_schema() {
+    let install = TestInstall::new();
+    let profile = install.claude_profile(".claude");
+    fs::create_dir_all(&profile).unwrap();
+    let installed = install.command(&[]);
+    assert!(installed.status.success(), "{}", stderr(&installed));
+    let metadata = install.status_metadata(".claude");
+    let wrapper = install.status_wrapper(".claude");
+    let settings = profile.join("settings.json");
+    let settings_before = fs::read_to_string(&settings).unwrap();
+    fs::write(
+        &metadata,
+        r#"{"version":1,"hadSettingsFile":false,"hadStatusLine":true,"previousStatusLine":null}"#,
+    )
+    .unwrap();
+
+    let removed = install.command(&["--uninstall"]);
+
+    assert!(!removed.status.success());
+    assert!(stderr(&removed).contains("invalid Claude status integration metadata"));
+    assert_eq!(fs::read_to_string(&settings).unwrap(), settings_before);
+    assert!(wrapper.exists());
+    assert!(metadata.exists());
+    assert!(install.bin_home.join("agent-instructions").exists());
 }
 
 fn stderr(output: &Output) -> String {

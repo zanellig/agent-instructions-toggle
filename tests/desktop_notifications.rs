@@ -1,8 +1,9 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Child, Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
 
@@ -52,14 +53,14 @@ impl TestDesktop {
         }
     }
 
-    fn write_enabled(&self, target: &str, filename: &str) {
-        let directory = self.home.join(target);
+    fn write_enabled(&self, active_profile: &str, filename: &str) {
+        let directory = self.home.join(active_profile);
         fs::create_dir_all(&directory).unwrap();
         fs::write(directory.join(filename), "instructions\n").unwrap();
     }
 
-    fn write_disabled(&self, target: &str, filename: &str) {
-        let directory = self.home.join(target);
+    fn write_disabled(&self, active_profile: &str, filename: &str) {
+        let directory = self.home.join(active_profile);
         fs::create_dir_all(&directory).unwrap();
         fs::write(
             directory.join(format!("{filename}.no-auto-inject")),
@@ -68,19 +69,35 @@ impl TestDesktop {
         .unwrap();
     }
 
-    fn create_target(&self, target: &str) {
-        fs::create_dir_all(self.home.join(target)).unwrap();
+    fn create_active_profile(&self, active_profile: &str) {
+        fs::create_dir_all(self.home.join(active_profile)).unwrap();
     }
 
     fn command(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_agent-instructions"))
+        self.command_builder(args).output().unwrap()
+    }
+
+    fn spawn(&self, args: &[&str]) -> Child {
+        self.command_builder(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap()
+    }
+
+    fn command_builder(&self, args: &[&str]) -> Command {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_agent-instructions"));
+        command
             .args(args)
             .env("HOME", &self.home)
             .env("XDG_RUNTIME_DIR", &self.runtime)
             .env("XDG_STATE_HOME", &self.state)
-            .env("PATH", &self.bin)
-            .output()
-            .unwrap()
+            .env("PATH", &self.bin);
+        command
+    }
+
+    fn instruction_document(&self, active_profile: &str, filename: &str) -> PathBuf {
+        self.home.join(active_profile).join(filename)
     }
 }
 
@@ -125,7 +142,7 @@ fn notification_failure_does_not_change_a_completed_transition() {
 fn notified_transition_names_missing_managed_targets() {
     let desktop = TestDesktop::new(0);
     desktop.write_enabled(".codex-work", "AGENTS.md");
-    desktop.create_target(".codex-empty");
+    desktop.create_active_profile(".codex-empty");
 
     let output = desktop.command(&["disable", "--notify"]);
 
@@ -161,7 +178,7 @@ fn notified_mixed_state_reports_recovery_without_claiming_the_requested_action()
 }
 
 #[test]
-fn notified_conflict_reports_that_instruction_files_were_unchanged() {
+fn notified_conflict_reports_that_instruction_documents_were_unchanged() {
     let desktop = TestDesktop::new(0);
     desktop.write_enabled(".codex-work", "AGENTS.md");
     desktop.write_disabled(".codex-work", "AGENTS.md");
@@ -178,6 +195,47 @@ fn notified_conflict_reports_that_instruction_files_were_unchanged() {
     );
     assert!(
         notification.contains("both names exist for .codex-work/AGENTS.md"),
+        "{notification}"
+    );
+}
+
+#[test]
+fn notified_failed_rollback_reports_that_instruction_state_may_have_changed() {
+    let desktop = TestDesktop::new(0);
+    desktop.write_enabled(".codex-alpha", "AGENTS.md");
+    for index in 0..2_000 {
+        desktop.write_enabled(&format!(".codex-middle-{index:04}"), "AGENTS.md");
+    }
+    desktop.write_enabled(".codex-zeta", "AGENTS.md");
+    let blocked_profile = desktop.home.join(".codex-zeta");
+    fs::set_permissions(&blocked_profile, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let mut child = desktop.spawn(&["disable", "--notify"]);
+    let first_disabled = desktop.instruction_document(".codex-alpha", "AGENTS.md.no-auto-inject");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !first_disabled.exists() {
+        assert!(Instant::now() < deadline, "first rename did not complete");
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "command exited before coordination"
+        );
+        std::thread::yield_now();
+    }
+    let rollback_blocked_profile = desktop.home.join(".codex-alpha");
+    fs::set_permissions(&rollback_blocked_profile, fs::Permissions::from_mode(0o555)).unwrap();
+
+    let output = child.wait_with_output().unwrap();
+    fs::set_permissions(&blocked_profile, fs::Permissions::from_mode(0o755)).unwrap();
+    fs::set_permissions(&rollback_blocked_profile, fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(!output.status.success());
+    let notification = fs::read_to_string(&desktop.notifications).unwrap();
+    assert!(
+        notification.contains("Agent instruction state uncertain"),
+        "{notification}"
+    );
+    assert!(
+        notification.contains("Some instruction documents may have changed"),
         "{notification}"
     );
 }

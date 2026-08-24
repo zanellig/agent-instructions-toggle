@@ -1,5 +1,6 @@
 mod desktop_notification;
 mod instruction_state;
+mod lock;
 mod tray;
 
 use std::process::ExitCode;
@@ -24,13 +25,14 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
 
     match command.as_str() {
         "status" => {
-            let machine = match args.next().as_deref() {
-                None => false,
-                Some("--machine") if args.next().is_none() => true,
+            let format = match args.next().as_deref() {
+                None => StatusFormat::Human,
+                Some("--machine") if args.next().is_none() => StatusFormat::Machine,
+                Some("--segment") if args.next().is_none() => StatusFormat::Segment,
                 _ => return Err(usage()),
             };
             let inspection = instruction_state::inspect().map_err(|error| error.to_string())?;
-            print_inspection(&inspection, machine);
+            print_inspection(&inspection, format);
             print_inspection_warnings(&inspection);
             Ok(())
         }
@@ -49,11 +51,10 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
             let result = match instruction_state::apply(action) {
                 Ok(result) => result,
                 Err(error) => {
-                    let error = error.to_string();
                     if notify {
                         desktop_notification::failure(&error);
                     }
-                    return Err(error);
+                    return Err(error.to_string());
                 }
             };
             if result.recovered_mixed_state {
@@ -61,7 +62,7 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
                     "Recovered mixed instruction state to on; requested action was not applied."
                 );
             }
-            print_inspection(&result.inspection, false);
+            print_inspection(&result.inspection, StatusFormat::Human);
             print_inspection_warnings(&result.inspection);
             if notify {
                 desktop_notification::transition(&result);
@@ -88,11 +89,22 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
     }
 }
 
-fn print_inspection(inspection: &instruction_state::Inspection, machine: bool) {
-    if machine {
-        println!("{}", inspection.state);
-    } else {
-        println!("Instruction state: {}", inspection.state);
+#[derive(Clone, Copy)]
+enum StatusFormat {
+    Human,
+    Machine,
+    Segment,
+}
+
+fn print_inspection(inspection: &instruction_state::Inspection, format: StatusFormat) {
+    match format {
+        StatusFormat::Human => println!("Instruction state: {}", inspection.state),
+        StatusFormat::Machine => println!("{}", inspection.state),
+        StatusFormat::Segment => println!(
+            "\u{1b}[{}mAGENTS:{}\u{1b}[0m",
+            inspection.state.appearance().ansi_sgr(),
+            inspection.state
+        ),
     }
 }
 
@@ -112,6 +124,6 @@ fn print_inspection_warnings(inspection: &instruction_state::Inspection) {
 }
 
 fn usage() -> String {
-    "usage: agent-instructions status [--machine] | (enable | disable | toggle) [--notify] | tray | profiles --claude --null"
+    "usage: agent-instructions status [--machine | --segment] | (enable | disable | toggle) [--notify] | tray | profiles --claude --null"
         .to_owned()
 }

@@ -30,6 +30,33 @@ readonly application_entry="${data_directory}/applications/${desktop_filename}"
 readonly kglobalaccel_entry="${data_directory}/kglobalaccel/${desktop_filename}"
 readonly autostart_entry="${data_directory}/autostart/${desktop_filename}"
 
+declare -a temporary_files=()
+
+cleanup_temporary_files() {
+    if ((${#temporary_files[@]})); then
+        rm -f -- "${temporary_files[@]}"
+    fi
+}
+
+trap cleanup_temporary_files EXIT
+
+create_temporary_file() {
+    local output_variable=$1
+    local temporary_file
+    temporary_file=$(mktemp)
+    temporary_files+=("$temporary_file")
+    printf -v "$output_variable" '%s' "$temporary_file"
+}
+
+create_sibling_temporary_file() {
+    local destination=$1
+    local output_variable=$2
+    local temporary_file
+    temporary_file=$(mktemp -- "${destination}.tmp.XXXXXXXXXX")
+    temporary_files+=("$temporary_file")
+    printf -v "$output_variable" '%s' "$temporary_file"
+}
+
 refresh_desktop_metadata() {
     local refresher
     if [[ -n "${KBUILDSYCOCA:-}" ]]; then
@@ -120,6 +147,27 @@ validate_settings_file() {
     fi
 }
 
+validate_status_metadata() {
+    local metadata=$1
+    local profile=$2
+    if [[ ! -f "$metadata" || -L "$metadata" ]] || ! jq -e '
+        .version == 1 and
+        (.hadSettingsFile | type == "boolean") and
+        (.hadStatusLine | type == "boolean") and
+        has("previousStatusLine") and
+        (if .hadStatusLine then
+            (.previousStatusLine | type == "object") and
+            .previousStatusLine.type == "command" and
+            (.previousStatusLine.command | type == "string")
+         else
+            .previousStatusLine == null
+         end)
+    ' "$metadata" >/dev/null; then
+        printf 'error: invalid Claude status integration metadata in %s\n' "$profile" >&2
+        return 1
+    fi
+}
+
 validate_claude_profile() {
     local profile=$1
     local settings="${profile}/settings.json"
@@ -136,22 +184,7 @@ validate_claude_profile() {
             printf 'error: incomplete Claude status integration in %s; refusing to replace existing files\n' "$profile" >&2
             return 1
         fi
-        if ! jq -e '
-            .version == 1 and
-            (.hadSettingsFile | type == "boolean") and
-            (.hadStatusLine | type == "boolean") and
-            has("previousStatusLine") and
-            (if .hadStatusLine then
-                (.previousStatusLine | type == "object") and
-                .previousStatusLine.type == "command" and
-                (.previousStatusLine.command | type == "string")
-             else
-                .previousStatusLine == null
-             end)
-        ' "$metadata" >/dev/null; then
-            printf 'error: invalid Claude status integration metadata in %s\n' "$profile" >&2
-            return 1
-        fi
+        validate_status_metadata "$metadata" "$profile"
         if [[ "$current_command" != "$expected_command" ]]; then
             printf 'error: Claude status command changed after installation in %s; refusing to overwrite it\n' "$profile" >&2
             return 1
@@ -177,7 +210,7 @@ write_status_wrapper() {
     local profile=$1
     local wrapper="${profile}/${status_wrapper_name}"
     local metadata="${profile}/${status_metadata_name}"
-    local wrapper_temp="${wrapper}.tmp.$$"
+    local wrapper_temp
     local had_status previous_command
 
     had_status=$(jq -r '.hadStatusLine' "$metadata")
@@ -186,6 +219,8 @@ write_status_wrapper() {
         previous_command=$(jq -r '.previousStatusLine.command' "$metadata")
         parse_status_command "$previous_command" "$profile"
     fi
+
+    create_sibling_temporary_file "$wrapper" wrapper_temp
 
     {
         printf '%s\n' '#!/usr/bin/env bash' 'set -uo pipefail'
@@ -204,24 +239,17 @@ write_status_wrapper() {
             'fi' \
             'warning_file=$(mktemp)' \
             'trap '\''rm -f -- "$warning_file"'\'' EXIT' \
-            'if ! state=$("$agent_instructions_binary" status --machine 2>"$warning_file"); then' \
-            '    state=conflict' \
+            'if ! segment=$("$agent_instructions_binary" status --segment 2>"$warning_file"); then' \
+            '    segment=AGENTS:conflict' \
             '    printf '\''status unavailable\n'\'' > "$warning_file"' \
             'fi' \
-            'case "$state" in' \
-            '    on) color=32 ;;' \
-            '    off) color=90 ;;' \
-            '    mixed) color=33 ;;' \
-            '    conflict) color=31 ;;' \
-            '    *) state=conflict; color=31; printf '\''invalid machine status\n'\'' > "$warning_file" ;;' \
-            'esac' \
             'details=$(<"$warning_file")' \
             'details=${details#Warning: }' \
             'details=${details//$'\''\n'\''/; }' \
             'if [[ -n "$base_output" ]]; then' \
             '    printf '\''%s | '\'' "$base_output"' \
             'fi' \
-            'printf '\''\033[%smAGENTS:%s\033[0m'\'' "$color" "$state"' \
+            'printf '\''%s'\'' "$segment"' \
             'if [[ -n "$details" ]]; then' \
             '    printf '\'' \033[33m[%s]\033[0m'\'' "$details"' \
             'fi' \
@@ -236,8 +264,7 @@ install_claude_profile() {
     local settings="${profile}/settings.json"
     local wrapper="${profile}/${status_wrapper_name}"
     local metadata="${profile}/${status_metadata_name}"
-    local settings_temp="${settings}.tmp.$$"
-    local metadata_temp="${metadata}.tmp.$$"
+    local settings_temp metadata_temp
     local wrapper_command had_settings had_status previous_status
 
     wrapper_command=$(status_wrapper_command "$wrapper")
@@ -252,6 +279,7 @@ install_claude_profile() {
             had_status=true
             previous_status=$(jq -c '.statusLine' "$settings")
         fi
+        create_sibling_temporary_file "$metadata" metadata_temp
         jq -n \
             --argjson hadSettingsFile "$had_settings" \
             --argjson hadStatusLine "$had_status" \
@@ -262,6 +290,7 @@ install_claude_profile() {
         write_status_wrapper "$profile"
     fi
 
+    create_sibling_temporary_file "$settings" settings_temp
     if [[ -e "$settings" ]]; then
         jq --arg command "$wrapper_command" \
             'if has("statusLine") then .statusLine.type = "command" | .statusLine.command = $command else .statusLine = {type: "command", command: $command} end' \
@@ -284,15 +313,7 @@ remove_claude_profile() {
         return 0
     fi
     require_jq
-    if [[ ! -f "$metadata" || -L "$metadata" ]] || ! jq -e '
-        .version == 1 and
-        (.hadSettingsFile | type == "boolean") and
-        (.hadStatusLine | type == "boolean") and
-        has("previousStatusLine")
-    ' "$metadata" >/dev/null; then
-        printf 'error: invalid Claude status integration metadata in %s; settings were not changed\n' "$profile" >&2
-        return 1
-    fi
+    validate_status_metadata "$metadata" "$profile"
     validate_settings_file "$settings"
     expected_command=$(status_wrapper_command "$wrapper")
     if [[ -e "$settings" ]]; then
@@ -301,7 +322,7 @@ remove_claude_profile() {
         current_command=""
     fi
     if [[ "$current_command" == "$expected_command" ]]; then
-        settings_temp="${settings}.tmp.$$"
+        create_sibling_temporary_file "$settings" settings_temp
         had_status=$(jq -r '.hadStatusLine' "$metadata")
         had_settings=$(jq -r '.hadSettingsFile' "$metadata")
         if [[ "$had_status" == "true" ]]; then
@@ -346,8 +367,7 @@ if [[ "${1:-}" == "--uninstall" ]]; then
         printf 'error: installed or built agent-instructions binary is required for safe Claude profile discovery\n' >&2
         exit 1
     fi
-    profiles_file=$(mktemp)
-    trap 'rm -f -- "$profiles_file"' EXIT
+    create_temporary_file profiles_file
     list_claude_profiles "$discovery_binary" "$profiles_file"
     mapfile -d '' -t claude_profiles < "$profiles_file"
     for profile in "${claude_profiles[@]}"; do
@@ -373,10 +393,9 @@ if [[ ! -f "$built_binary" ]]; then
     exit 1
 fi
 
-profiles_file=$(mktemp)
-desktop_entry=$(mktemp)
-autostart_desktop_entry=$(mktemp)
-trap 'rm -f -- "$profiles_file" "$desktop_entry" "$autostart_desktop_entry"' EXIT
+create_temporary_file profiles_file
+create_temporary_file desktop_entry
+create_temporary_file autostart_desktop_entry
 list_claude_profiles "$built_binary" "$profiles_file"
 mapfile -d '' -t claude_profiles < "$profiles_file"
 if ((${#claude_profiles[@]})); then

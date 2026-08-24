@@ -1,6 +1,6 @@
 use std::process::{Command, Stdio};
 
-use crate::instruction_state::{ApplyResult, Inspection, InstructionState};
+use crate::instruction_state::{ApplyResult, Error, Inspection, InstructionState};
 
 pub fn transition(result: &ApplyResult) {
     let (title, message) = if result.recovered_mixed_state {
@@ -26,11 +26,20 @@ pub fn transition(result: &ApplyResult) {
     send(title, &body);
 }
 
-pub fn failure(error: &str) {
-    send(
-        "Agent instructions unchanged",
-        &format!("Could not change global instructions: {error}"),
-    );
+pub fn failure(error: &Error) {
+    if error.guarantees_unchanged() {
+        send(
+            "Agent instructions unchanged",
+            &format!("Could not change global instructions: {error}"),
+        );
+    } else {
+        send(
+            "Agent instruction state uncertain",
+            &format!(
+                "Could not complete the transition. Some instruction documents may have changed. Inspect the current state before trying again: {error}"
+            ),
+        );
+    }
 }
 
 pub fn status(inspection: &Inspection) {

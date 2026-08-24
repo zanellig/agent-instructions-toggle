@@ -1,8 +1,5 @@
 use std::collections::BTreeSet;
-use std::env;
-use std::fs::{self, File, OpenOptions};
-use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::{self, Sender};
 
 use ksni::menu::StandardItem;
@@ -10,6 +7,7 @@ use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::desktop_notification;
 use crate::instruction_state::{self, Action, Inspection, InstructionState, WatchLocations};
+use crate::lock;
 
 const ICON_SIZE: i32 = 22;
 
@@ -64,13 +62,13 @@ impl ksni::Tray for TrayIndicator {
             .inspection
             .missing_targets
             .iter()
-            .map(|target| format!("Missing: {target}"))
+            .map(|managed_target| format!("Missing: {managed_target}"))
             .collect();
         details.extend(
             self.inspection
                 .collision_targets
                 .iter()
-                .map(|target| format!("Conflict: {target}")),
+                .map(|managed_target| format!("Conflict: {managed_target}")),
         );
         ksni::ToolTip {
             icon_pixmap: self.icon_pixmap(),
@@ -121,7 +119,7 @@ pub fn run() -> Result<(), String> {
     use ksni::blocking::TrayMethods as _;
 
     let inspection = instruction_state::inspect().map_err(|error| error.to_string())?;
-    let _instance_lock = acquire_instance_lock(&inspection.watch_locations.home_directory)?;
+    let _instance_lock = lock::tray_instance(&inspection.watch_locations.home_directory)?;
     let (events, receiver) = mpsc::channel();
     let mut watcher = NativeWatcher::new(&inspection.watch_locations, events.clone())?;
     let handle = TrayIndicator::new(inspection, events)
@@ -139,7 +137,7 @@ pub fn run() -> Result<(), String> {
                         update_tray(&handle, &mut watcher, result.inspection)?;
                     }
                     Err(error) => {
-                        desktop_notification::failure(&error.to_string());
+                        desktop_notification::failure(&error);
                         refresh_tray(&handle, &mut watcher)?;
                     }
                 }
@@ -153,7 +151,12 @@ pub fn run() -> Result<(), String> {
                 let locations = handle
                     .update(|tray| tray.inspection.watch_locations.clone())
                     .ok_or_else(|| "tray service stopped".to_owned())?;
-                if filesystem_event_is_relevant(&event, &locations) {
+                if !event.kind.is_access()
+                    && event
+                        .paths
+                        .iter()
+                        .any(|path| locations.is_relevant_path(path))
+                {
                     refresh_tray(&handle, &mut watcher)?;
                 }
             }
@@ -184,16 +187,6 @@ fn update_tray(
     handle
         .update(move |tray| tray.inspection = inspection)
         .ok_or_else(|| "tray service stopped".to_owned())
-}
-
-fn filesystem_event_is_relevant(event: &Event, locations: &WatchLocations) -> bool {
-    if event.kind.is_access() {
-        return false;
-    }
-    event.paths.iter().any(|path| {
-        locations.instruction_paths.contains(path)
-            || path.parent() == Some(locations.home_directory.as_path())
-    })
 }
 
 struct NativeWatcher {
@@ -236,68 +229,8 @@ impl NativeWatcher {
     }
 }
 
-fn acquire_instance_lock(home: &Path) -> Result<File, String> {
-    let runtime_attempt = env::var_os("XDG_RUNTIME_DIR").map(|directory| {
-        try_lock_file(&PathBuf::from(directory).join("agent-instructions-tray.lock"))
-    });
-    match runtime_attempt {
-        Some(Ok(file)) => return Ok(file),
-        Some(Err(InstanceLockError::AlreadyRunning)) => {
-            return Err("agent-instructions tray is already running".to_owned());
-        }
-        _ => {}
-    }
-
-    let state_directory = env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".local/state"))
-        .join("agent-instructions");
-    fs::create_dir_all(&state_directory).map_err(|error| {
-        format!(
-            "cannot create tray state directory {}: {error}",
-            state_directory.display()
-        )
-    })?;
-    match try_lock_file(&state_directory.join("tray.lock")) {
-        Ok(file) => Ok(file),
-        Err(InstanceLockError::AlreadyRunning) => {
-            Err("agent-instructions tray is already running".to_owned())
-        }
-        Err(InstanceLockError::Io(error)) => {
-            Err(format!("cannot acquire tray instance lock: {error}"))
-        }
-    }
-}
-
-#[derive(Debug)]
-enum InstanceLockError {
-    AlreadyRunning,
-    Io(io::Error),
-}
-
-fn try_lock_file(path: &Path) -> Result<File, InstanceLockError> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)
-        .map_err(InstanceLockError::Io)?;
-    match file.try_lock() {
-        Ok(()) => Ok(file),
-        Err(fs::TryLockError::WouldBlock) => Err(InstanceLockError::AlreadyRunning),
-        Err(fs::TryLockError::Error(error)) => Err(InstanceLockError::Io(error)),
-    }
-}
-
 fn state_icon(state: InstructionState) -> ksni::Icon {
-    let color = match state {
-        InstructionState::On => [255, 46, 160, 67],
-        InstructionState::Off => [255, 117, 117, 117],
-        InstructionState::Mixed => [255, 245, 166, 35],
-        InstructionState::Conflict => [255, 211, 47, 47],
-    };
-    colored_circle(ICON_SIZE, color)
+    colored_circle(ICON_SIZE, state.appearance().argb())
 }
 
 fn colored_circle(size: i32, color: [u8; 4]) -> ksni::Icon {
@@ -414,17 +347,24 @@ mod tests {
     }
 
     #[test]
-    fn instance_lock_rejects_a_second_holder() {
-        let root = temp_directory();
-        fs::create_dir_all(&root).unwrap();
-        let path = root.join("tray.lock");
-        let _first = try_lock_file(&path).unwrap();
+    fn watch_locations_recognize_only_potential_profiles_and_instruction_documents() {
+        let home = PathBuf::from("/tmp/home");
+        let profile = home.join(".codex-work");
+        let locations = WatchLocations {
+            home_directory: home.clone(),
+            profile_directories: vec![profile.clone()],
+            instruction_paths: vec![
+                profile.join("AGENTS.md"),
+                profile.join("AGENTS.md.no-auto-inject"),
+            ],
+        };
 
-        assert!(matches!(
-            try_lock_file(&path),
-            Err(InstanceLockError::AlreadyRunning)
-        ));
-        fs::remove_dir_all(root).unwrap();
+        assert!(locations.is_relevant_path(&home.join(".codex-new")));
+        assert!(locations.is_relevant_path(&home.join(".claude-team")));
+        assert!(locations.is_relevant_path(&profile.join("AGENTS.md")));
+        assert!(!locations.is_relevant_path(&home.join("Downloads")));
+        assert!(!locations.is_relevant_path(&home.join(".codex-backup")));
+        assert!(!locations.is_relevant_path(&profile.join("settings.json")));
     }
 
     fn inspection(state: InstructionState, missing_targets: &[&str]) -> Inspection {
@@ -432,7 +372,7 @@ mod tests {
             state,
             missing_targets: missing_targets
                 .iter()
-                .map(|target| (*target).to_owned())
+                .map(|managed_target| (*managed_target).to_owned())
                 .collect(),
             collision_targets: Vec::new(),
             claude_profile_directories: Vec::new(),

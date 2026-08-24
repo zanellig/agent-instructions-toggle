@@ -36,24 +36,28 @@ impl TestHome {
         }
     }
 
-    fn write_enabled(&self, target: &str, filename: &str) {
-        let directory = self.home.join(target);
-        fs::create_dir_all(&directory).unwrap();
-        fs::write(directory.join(filename), format!("{target} instructions\n")).unwrap();
-    }
-
-    fn write_disabled(&self, target: &str, filename: &str) {
-        let directory = self.home.join(target);
+    fn write_enabled(&self, active_profile: &str, filename: &str) {
+        let directory = self.home.join(active_profile);
         fs::create_dir_all(&directory).unwrap();
         fs::write(
-            directory.join(format!("{filename}.no-auto-inject")),
-            format!("{target} instructions\n"),
+            directory.join(filename),
+            format!("{active_profile} instructions\n"),
         )
         .unwrap();
     }
 
-    fn create_directory(&self, target: &str) {
-        fs::create_dir_all(self.home.join(target)).unwrap();
+    fn write_disabled(&self, active_profile: &str, filename: &str) {
+        let directory = self.home.join(active_profile);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            directory.join(format!("{filename}.no-auto-inject")),
+            format!("{active_profile} instructions\n"),
+        )
+        .unwrap();
+    }
+
+    fn create_active_profile(&self, active_profile: &str) {
+        fs::create_dir_all(self.home.join(active_profile)).unwrap();
     }
 
     fn write_symlinked_profile(&self, link_name: &str) {
@@ -92,8 +96,8 @@ impl TestHome {
         command
     }
 
-    fn path(&self, target: &str, filename: &str) -> PathBuf {
-        self.home.join(target).join(filename)
+    fn instruction_document(&self, active_profile: &str, filename: &str) -> PathBuf {
+        self.home.join(active_profile).join(filename)
     }
 }
 
@@ -136,8 +140,8 @@ fn status_reports_on_in_human_and_machine_formats() {
 fn status_reports_partial_absence_without_hiding_the_healthy_state() {
     let home = TestHome::new();
     home.write_enabled(".codex-work", "AGENTS.md");
-    home.create_directory(".codex-zeta");
-    home.create_directory(".codex-alpha");
+    home.create_active_profile(".codex-zeta");
+    home.create_active_profile(".codex-alpha");
 
     let status = home.command(&["status", "--machine"]);
 
@@ -161,22 +165,26 @@ fn discovery_manages_active_claude_profiles_and_excludes_backups() {
 
     assert!(disable.status.success(), "{}", stderr(&disable));
     for profile in [".claude", ".claude-work"] {
-        assert_path_exists(&home.path(profile, "CLAUDE.md.no-auto-inject"));
-        assert!(!home.path(profile, "CLAUDE.md").exists());
+        assert_path_exists(&home.instruction_document(profile, "CLAUDE.md.no-auto-inject"));
+        assert!(!home.instruction_document(profile, "CLAUDE.md").exists());
     }
     for profile in [".claude-backup2", ".claudearchive"] {
-        assert_path_exists(&home.path(profile, "CLAUDE.md"));
-        assert!(!home.path(profile, "CLAUDE.md.no-auto-inject").exists());
+        assert_path_exists(&home.instruction_document(profile, "CLAUDE.md"));
+        assert!(
+            !home
+                .instruction_document(profile, "CLAUDE.md.no-auto-inject")
+                .exists()
+        );
     }
 }
 
 #[test]
 fn profiles_lists_discovered_claude_directories_for_installers() {
     let home = TestHome::new();
-    home.create_directory(".claude-work");
-    home.create_directory(".claude");
-    home.create_directory(".claude-old");
-    home.create_directory(".codex");
+    home.create_active_profile(".claude-work");
+    home.create_active_profile(".claude");
+    home.create_active_profile(".claude-old");
+    home.create_active_profile(".codex");
 
     let profiles = home.command(&["profiles", "--claude", "--null"]);
 
@@ -206,6 +214,41 @@ fn status_sanitizes_control_characters_in_discovered_profile_names() {
         stderr(&status),
         "Warning: missing managed targets: .claude-?[31m/CLAUDE.md\n"
     );
+}
+
+#[test]
+fn status_sanitizes_markup_characters_in_discovered_profile_names() {
+    let home = TestHome::new();
+    home.create_active_profile(".claude-<b>&\"'");
+
+    let status = home.command(&["status", "--machine"]);
+
+    assert!(status.status.success(), "{}", stderr(&status));
+    assert_eq!(stdout(&status), "conflict\n");
+    assert_eq!(
+        stderr(&status),
+        "Warning: missing managed targets: .claude-?b????/CLAUDE.md\n"
+    );
+}
+
+#[test]
+fn status_segment_uses_the_canonical_state_appearance() {
+    for (state, setup, expected) in [
+        ("on", true, "\u{1b}[32mAGENTS:on\u{1b}[0m\n"),
+        ("off", false, "\u{1b}[90mAGENTS:off\u{1b}[0m\n"),
+    ] {
+        let home = TestHome::new();
+        if setup {
+            home.write_enabled(".codex-work", "AGENTS.md");
+        } else {
+            home.write_disabled(".codex-work", "AGENTS.md");
+        }
+
+        let status_output = home.command(&["status", "--segment"]);
+
+        assert!(status_output.status.success(), "{}", stderr(&status_output));
+        assert_eq!(stdout(&status_output), expected, "{state}");
+    }
 }
 
 #[test]
@@ -248,14 +291,16 @@ fn mutation_commands_transition_all_targets_and_are_idempotent() {
     let disable = home.command(&["disable"]);
     assert!(disable.status.success(), "{}", stderr(&disable));
     assert_eq!(stdout(&disable), "Instruction state: off\n");
-    for (target, filename) in [
+    for (active_profile, filename) in [
         (".codex", "AGENTS.md"),
         (".codex-lab", "AGENTS.md"),
         (".codex.team", "AGENTS.md"),
         (".claude", "CLAUDE.md"),
     ] {
-        assert!(!home.path(target, filename).exists());
-        assert_path_exists(&home.path(target, &format!("{filename}.no-auto-inject")));
+        assert!(!home.instruction_document(active_profile, filename).exists());
+        assert_path_exists(
+            &home.instruction_document(active_profile, &format!("{filename}.no-auto-inject")),
+        );
     }
 
     let repeated_disable = home.command(&["disable"]);
@@ -274,7 +319,7 @@ fn mutation_commands_transition_all_targets_and_are_idempotent() {
     assert!(enable.status.success(), "{}", stderr(&enable));
     assert_eq!(stdout(&enable), "Instruction state: on\n");
     assert_eq!(
-        fs::read_to_string(home.path(".codex", "AGENTS.md")).unwrap(),
+        fs::read_to_string(home.instruction_document(".codex", "AGENTS.md")).unwrap(),
         ".codex instructions\n"
     );
 }
@@ -283,7 +328,7 @@ fn mutation_commands_transition_all_targets_and_are_idempotent() {
 fn mutation_warns_about_missing_targets_and_changes_healthy_targets() {
     let home = TestHome::new();
     home.write_enabled(".codex-work", "AGENTS.md");
-    home.create_directory(".codex-empty");
+    home.create_active_profile(".codex-empty");
 
     let disable = home.command(&["disable"]);
 
@@ -293,7 +338,7 @@ fn mutation_warns_about_missing_targets_and_changes_healthy_targets() {
         stderr(&disable),
         "Warning: missing managed targets: .codex-empty/AGENTS.md\n"
     );
-    assert_path_exists(&home.path(".codex-work", "AGENTS.md.no-auto-inject"));
+    assert_path_exists(&home.instruction_document(".codex-work", "AGENTS.md.no-auto-inject"));
 }
 
 #[test]
@@ -309,11 +354,11 @@ fn mutation_recovers_mixed_state_to_on_and_stops() {
         stdout(&disable),
         "Recovered mixed instruction state to on; requested action was not applied.\nInstruction state: on\n"
     );
-    assert_path_exists(&home.path(".codex-alpha", "AGENTS.md"));
-    assert_path_exists(&home.path(".codex-zeta", "AGENTS.md"));
+    assert_path_exists(&home.instruction_document(".codex-alpha", "AGENTS.md"));
+    assert_path_exists(&home.instruction_document(".codex-zeta", "AGENTS.md"));
     assert!(
         !home
-            .path(".codex-zeta", "AGENTS.md.no-auto-inject")
+            .instruction_document(".codex-zeta", "AGENTS.md.no-auto-inject")
             .exists()
     );
 }
@@ -332,8 +377,8 @@ fn mutation_refuses_collisions_without_changing_either_file() {
         "{}",
         stderr(&disable)
     );
-    assert_path_exists(&home.path(".codex-work", "AGENTS.md"));
-    assert_path_exists(&home.path(".codex-work", "AGENTS.md.no-auto-inject"));
+    assert_path_exists(&home.instruction_document(".codex-work", "AGENTS.md"));
+    assert_path_exists(&home.instruction_document(".codex-work", "AGENTS.md.no-auto-inject"));
 }
 
 #[test]
@@ -356,7 +401,7 @@ fn later_rename_failure_rolls_back_completed_renames() {
     let home = TestHome::new();
     home.write_enabled(".codex-alpha", "AGENTS.md");
     home.write_enabled(".codex-zeta", "AGENTS.md");
-    let blocked_directory = home.path(".codex-zeta", "");
+    let blocked_directory = home.instruction_document(".codex-zeta", "");
     fs::set_permissions(&blocked_directory, fs::Permissions::from_mode(0o555)).unwrap();
 
     let disable = home.command(&["disable"]);
@@ -368,16 +413,16 @@ fn later_rename_failure_rolls_back_completed_renames() {
         "{}",
         stderr(&disable)
     );
-    assert_path_exists(&home.path(".codex-alpha", "AGENTS.md"));
+    assert_path_exists(&home.instruction_document(".codex-alpha", "AGENTS.md"));
     assert!(
         !home
-            .path(".codex-alpha", "AGENTS.md.no-auto-inject")
+            .instruction_document(".codex-alpha", "AGENTS.md.no-auto-inject")
             .exists()
     );
-    assert_path_exists(&home.path(".codex-zeta", "AGENTS.md"));
+    assert_path_exists(&home.instruction_document(".codex-zeta", "AGENTS.md"));
     assert!(
         !home
-            .path(".codex-zeta", "AGENTS.md.no-auto-inject")
+            .instruction_document(".codex-zeta", "AGENTS.md.no-auto-inject")
             .exists()
     );
 }
@@ -410,7 +455,7 @@ fn mutation_uses_the_state_directory_when_no_runtime_directory_is_available() {
 
     assert!(disable.status.success(), "{}", stderr(&disable));
     assert_path_exists(&home.state.join("agent-instructions/operation.lock"));
-    assert_path_exists(&home.path(".codex-work", "AGENTS.md.no-auto-inject"));
+    assert_path_exists(&home.instruction_document(".codex-work", "AGENTS.md.no-auto-inject"));
 }
 
 #[test]
@@ -430,8 +475,8 @@ fn mutation_discovers_profiles_added_between_invocations() {
         "{}",
         stderr(&after_addition)
     );
-    assert_path_exists(&home.path(".codex-alpha", "AGENTS.md.no-auto-inject"));
-    assert_path_exists(&home.path(".codex-new-team", "AGENTS.md.no-auto-inject"));
+    assert_path_exists(&home.instruction_document(".codex-alpha", "AGENTS.md.no-auto-inject"));
+    assert_path_exists(&home.instruction_document(".codex-new-team", "AGENTS.md.no-auto-inject"));
 }
 
 #[test]
@@ -442,8 +487,12 @@ fn mutation_discovers_symlinked_profile_directories() {
     let disable = home.command(&["disable"]);
 
     assert!(disable.status.success(), "{}", stderr(&disable));
-    assert_path_exists(&home.path(".codex-linked", "AGENTS.md.no-auto-inject"));
-    assert!(!home.path(".codex-linked", "AGENTS.md").exists());
+    assert_path_exists(&home.instruction_document(".codex-linked", "AGENTS.md.no-auto-inject"));
+    assert!(
+        !home
+            .instruction_document(".codex-linked", "AGENTS.md")
+            .exists()
+    );
 }
 
 #[test]
@@ -471,12 +520,16 @@ fn discovery_excludes_backup_like_profiles_and_non_directories() {
 
     assert!(disable.status.success(), "{}", stderr(&disable));
     for profile in excluded {
-        assert_path_exists(&home.path(profile, "AGENTS.md"));
-        assert!(!home.path(profile, "AGENTS.md.no-auto-inject").exists());
+        assert_path_exists(&home.instruction_document(profile, "AGENTS.md"));
+        assert!(
+            !home
+                .instruction_document(profile, "AGENTS.md.no-auto-inject")
+                .exists()
+        );
     }
     for profile in [".codex-team", ".codexish"] {
-        assert_path_exists(&home.path(profile, "AGENTS.md.no-auto-inject"));
-        assert!(!home.path(profile, "AGENTS.md").exists());
+        assert_path_exists(&home.instruction_document(profile, "AGENTS.md.no-auto-inject"));
+        assert!(!home.instruction_document(profile, "AGENTS.md").exists());
     }
     assert_eq!(
         fs::read_to_string(home.home.join(".codex-regular-file")).unwrap(),

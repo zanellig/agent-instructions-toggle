@@ -17,6 +17,7 @@ Disabled documents append `.no-auto-inject` to the recognized filename.
 ```sh
 agent-instructions status
 agent-instructions status --machine
+agent-instructions status --segment
 agent-instructions enable
 agent-instructions disable
 agent-instructions toggle
@@ -24,13 +25,13 @@ agent-instructions toggle --notify
 agent-instructions tray
 ```
 
-`status` prints the aggregate instruction state and exits successfully for every observable state. `status --machine` prints only `on`, `off`, `mixed`, or `conflict` to standard output. Missing-target and collision details go to standard error, so command substitution receives one token.
+`status` prints the aggregate instruction state and exits successfully for every observable state. `status --machine` prints only `on`, `off`, `mixed`, or `conflict` to standard output. `status --segment` prints the colored `AGENTS:<state>` status-line segment. Missing-target and collision details go to standard error, so command substitution receives one token or one segment.
 
 `enable` restores recognized filenames. `disable` appends `.no-auto-inject`. `toggle` selects the opposite of a uniform `on` or `off` state. Repeating `enable` or `disable` is harmless.
 
 Pass `--notify` to `enable`, `disable`, or `toggle` to request a desktop notification. Notification delivery is best effort. A missing notification daemon or failed notification does not change the command result or roll back a completed instruction-state transition.
 
-All mutations share one filesystem lock under `$XDG_RUNTIME_DIR`, with `$XDG_STATE_HOME` as the fallback. Before renaming anything, the command validates every source and destination. It never replaces an existing destination. If a later rename fails, it attempts to restore completed renames and returns an error.
+All mutations share one filesystem lock under `$XDG_RUNTIME_DIR`, with `$XDG_STATE_HOME` as the fallback. Before renaming anything, the command validates every source and destination. It never replaces an existing destination. If a later rename fails, it attempts to restore completed renames and returns an error. A notified failure says the documents are unchanged only when no rename completed or rollback restored every completed rename. If rollback also fails, the notification says the state is uncertain and directs the user to inspect it.
 
 ## Instruction states
 
@@ -82,7 +83,7 @@ Install the release binary and desktop integrations for the current user:
 
 The installer runs `cargo build --release --locked` and copies the binary to `${XDG_BIN_HOME:-$HOME/.local/bin}/agent-instructions`. It installs application, KGlobalAccel, and XDG autostart desktop entries under `${XDG_DATA_HOME:-$HOME/.local/share}`. The Plasma shortcut is `Meta+Ctrl+Shift+A`. The installer refreshes service metadata with `kbuildsycoca6`, or `kbuildsycoca5` on Plasma 5. It does not edit `kglobalshortcutsrc` or restart KGlobalAccel.
 
-When active Claude profiles exist, installation requires `jq`. For each profile, the installer parses `settings.json`, preserves its existing command status line, and points Claude Code at a project-owned wrapper in that profile. The wrapper forwards Claude's session JSON to the prior command unchanged, then calls the installed binary's `status --machine`. It appends `AGENTS:on`, `AGENTS:off`, `AGENTS:mixed`, or `AGENTS:conflict` in green, gray, amber, or red. Missing-target details remain visible in amber beside the base state.
+When active Claude profiles exist, installation requires `jq`. For each profile, the installer parses `settings.json`, preserves its existing command status line, and points Claude Code at a project-owned wrapper in that profile. The wrapper forwards Claude's session JSON to the prior command unchanged, then appends the installed binary's `status --segment` output. The binary owns the shared green, gray, amber, and red state appearance used by both the Claude segment and tray icon. Missing-target details remain visible in amber beside the base state.
 
 Claude Code runs the wrapper on its normal status-line refresh after an interaction. The integration does not add an idle timer or polling loop.
 

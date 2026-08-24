@@ -1,11 +1,12 @@
-use std::env;
 use std::ffi::CString;
 use std::fmt;
-use std::fs::{self, File, OpenOptions};
+use std::fs;
 use std::io;
 use std::os::raw::{c_char, c_int, c_uint};
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
+
+use crate::lock;
 
 const BACKUP_TOKENS: [&[u8]; 8] = [
     b"bak",
@@ -39,6 +40,45 @@ pub enum InstructionState {
     Conflict,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StateAppearance {
+    Green,
+    Gray,
+    Amber,
+    Red,
+}
+
+impl InstructionState {
+    pub fn appearance(self) -> StateAppearance {
+        match self {
+            Self::On => StateAppearance::Green,
+            Self::Off => StateAppearance::Gray,
+            Self::Mixed => StateAppearance::Amber,
+            Self::Conflict => StateAppearance::Red,
+        }
+    }
+}
+
+impl StateAppearance {
+    pub fn argb(self) -> [u8; 4] {
+        match self {
+            Self::Green => [255, 46, 160, 67],
+            Self::Gray => [255, 117, 117, 117],
+            Self::Amber => [255, 245, 166, 35],
+            Self::Red => [255, 211, 47, 47],
+        }
+    }
+
+    pub fn ansi_sgr(self) -> u8 {
+        match self {
+            Self::Green => 32,
+            Self::Gray => 90,
+            Self::Amber => 33,
+            Self::Red => 31,
+        }
+    }
+}
+
 impl fmt::Display for InstructionState {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
@@ -66,6 +106,19 @@ pub struct WatchLocations {
     pub instruction_paths: Vec<PathBuf>,
 }
 
+impl WatchLocations {
+    pub fn is_relevant_path(&self, path: &Path) -> bool {
+        self.instruction_paths
+            .iter()
+            .any(|candidate| candidate == path)
+            || (path.parent() == Some(self.home_directory.as_path())
+                && path
+                    .file_name()
+                    .and_then(ProfileKind::from_profile_name)
+                    .is_some())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Action {
     Enable,
@@ -82,6 +135,33 @@ pub struct ApplyResult {
 #[derive(Debug)]
 pub struct Error {
     message: String,
+    outcome: FailureOutcome,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FailureOutcome {
+    Unchanged,
+    MayHaveChanged,
+}
+
+impl Error {
+    fn unchanged(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            outcome: FailureOutcome::Unchanged,
+        }
+    }
+
+    fn may_have_changed(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            outcome: FailureOutcome::MayHaveChanged,
+        }
+    }
+
+    pub fn guarantees_unchanged(&self) -> bool {
+        self.outcome == FailureOutcome::Unchanged
+    }
 }
 
 impl fmt::Display for Error {
@@ -97,7 +177,7 @@ pub fn inspect() -> Result<Inspection, Error> {
 
 pub fn apply(action: Action) -> Result<ApplyResult, Error> {
     let home = home_directory()?;
-    let _lock = acquire_lock(&home)?;
+    let _lock = lock::operation(&home).map_err(Error::unchanged)?;
     let snapshot = inspect_at(&home)?;
 
     if snapshot.inspection.state == InstructionState::Conflict {
@@ -109,7 +189,7 @@ pub fn apply(action: Action) -> Result<ApplyResult, Error> {
                 snapshot.inspection.collision_targets.join(", ")
             )
         };
-        return Err(Error { message });
+        return Err(Error::unchanged(message));
     }
 
     let recovered_mixed_state = snapshot.inspection.state == InstructionState::Mixed;
@@ -126,7 +206,7 @@ pub fn apply(action: Action) -> Result<ApplyResult, Error> {
         }
     };
 
-    rename_targets(&snapshot.targets, desired_state)?;
+    rename_targets(&snapshot.managed_targets, desired_state)?;
 
     Ok(ApplyResult {
         inspection: Inspection {
@@ -146,21 +226,21 @@ fn inspect_at(home: &Path) -> Result<Snapshot, Error> {
     let mut has_collision = false;
     let mut missing_targets = Vec::new();
     let mut collision_targets = Vec::new();
-    let discovered_targets = discover_targets(home)?;
-    let mut targets = Vec::with_capacity(discovered_targets.len());
+    let discovered_managed_targets = discover_managed_targets(home)?;
+    let mut managed_targets = Vec::with_capacity(discovered_managed_targets.len());
 
-    for target in discovered_targets {
-        let presence = target.presence()?;
+    for managed_target in discovered_managed_targets {
+        let presence = managed_target.presence()?;
         match presence {
             Presence::Enabled => has_enabled = true,
             Presence::Disabled => has_disabled = true,
             Presence::Collision => {
                 has_collision = true;
-                collision_targets.push(target.label.clone());
+                collision_targets.push(managed_target.display_label.clone());
             }
-            Presence::Missing => missing_targets.push(target.label.clone()),
+            Presence::Missing => missing_targets.push(managed_target.display_label.clone()),
         }
-        targets.push((target, presence));
+        managed_targets.push((managed_target, presence));
     }
 
     let state = if has_collision || (!has_enabled && !has_disabled) {
@@ -178,48 +258,58 @@ fn inspect_at(home: &Path) -> Result<Snapshot, Error> {
             state,
             missing_targets,
             collision_targets,
-            claude_profile_directories: targets
+            claude_profile_directories: managed_targets
                 .iter()
-                .filter(|(target, _)| target.filename == "CLAUDE.md")
-                .map(|(target, _)| target.directory.clone())
+                .filter(|(managed_target, _)| managed_target.kind == ProfileKind::Claude)
+                .map(|(managed_target, _)| managed_target.directory.clone())
                 .collect(),
             watch_locations: WatchLocations {
                 home_directory: home.to_owned(),
-                profile_directories: targets
+                profile_directories: managed_targets
                     .iter()
-                    .filter(|(target, _)| target.directory.is_dir())
-                    .map(|(target, _)| target.directory.clone())
+                    .filter(|(managed_target, _)| managed_target.directory.is_dir())
+                    .map(|(managed_target, _)| managed_target.directory.clone())
                     .collect(),
-                instruction_paths: targets
+                instruction_paths: managed_targets
                     .iter()
-                    .flat_map(|(target, _)| [target.enabled_path(), target.disabled_path()])
+                    .flat_map(|(managed_target, _)| {
+                        [
+                            managed_target.enabled_path(),
+                            managed_target.disabled_path(),
+                        ]
+                    })
                     .collect(),
             },
         },
-        targets,
+        managed_targets,
     })
 }
 
-fn discover_targets(home: &Path) -> Result<Vec<Target>, Error> {
-    let entries = fs::read_dir(home).map_err(|error| Error {
-        message: format!("cannot inspect home directory {}: {error}", home.display()),
+fn discover_managed_targets(home: &Path) -> Result<Vec<ManagedTarget>, Error> {
+    let entries = fs::read_dir(home).map_err(|error| {
+        Error::unchanged(format!(
+            "cannot inspect home directory {}: {error}",
+            display_path(home)
+        ))
     })?;
-    let mut targets = Vec::new();
+    let mut managed_targets = Vec::new();
 
     for entry in entries {
-        let entry = entry.map_err(|error| Error {
-            message: format!("cannot inspect an entry under {}: {error}", home.display()),
+        let entry = entry.map_err(|error| {
+            Error::unchanged(format!(
+                "cannot inspect an entry under {}: {error}",
+                display_path(home)
+            ))
         })?;
         let name = entry.file_name();
-        let filename = if is_profile_name(&name, b".codex") {
-            "AGENTS.md"
-        } else if is_profile_name(&name, b".claude") {
-            "CLAUDE.md"
-        } else {
+        let Some(kind) = ProfileKind::from_profile_name(&name) else {
             continue;
         };
-        let file_type = entry.file_type().map_err(|error| Error {
-            message: format!("cannot inspect {}: {error}", entry.path().display()),
+        let file_type = entry.file_type().map_err(|error| {
+            Error::unchanged(format!(
+                "cannot inspect {}: {error}",
+                display_path(&entry.path())
+            ))
         })?;
         let is_directory = if file_type.is_dir() {
             true
@@ -228,32 +318,37 @@ fn discover_targets(home: &Path) -> Result<Vec<Target>, Error> {
                 Ok(metadata) => metadata.is_dir(),
                 Err(error) if error.kind() == io::ErrorKind::NotFound => false,
                 Err(error) => {
-                    return Err(Error {
-                        message: format!("cannot inspect {}: {error}", entry.path().display()),
-                    });
+                    return Err(Error::unchanged(format!(
+                        "cannot inspect {}: {error}",
+                        display_path(&entry.path())
+                    )));
                 }
             }
         } else {
             false
         };
         if is_directory {
-            targets.push(Target::new(
+            managed_targets.push(ManagedTarget::new(
                 entry.path(),
-                filename,
-                sanitize_label(&format!("{}/{filename}", name.to_string_lossy())),
+                kind,
+                sanitize_display_label(&format!(
+                    "{}/{}",
+                    name.to_string_lossy(),
+                    kind.instruction_filename()
+                )),
             ));
         }
     }
 
-    targets.sort_by(|left, right| left.directory.cmp(&right.directory));
-    Ok(targets)
+    managed_targets.sort_by(|left, right| left.directory.cmp(&right.directory));
+    Ok(managed_targets)
 }
 
-fn sanitize_label(label: &str) -> String {
+fn sanitize_display_label(label: &str) -> String {
     label
         .chars()
         .map(|character| {
-            if character.is_control() {
+            if character.is_control() || matches!(character, '<' | '>' | '&' | '\'' | '"') {
                 '?'
             } else {
                 character
@@ -262,8 +357,37 @@ fn sanitize_label(label: &str) -> String {
         .collect()
 }
 
-fn is_profile_name(name: &std::ffi::OsStr, prefix: &[u8]) -> bool {
-    name.as_bytes().starts_with(prefix) && !is_backup_like_name(name, prefix.len())
+fn display_path(path: &Path) -> String {
+    sanitize_display_label(&path.to_string_lossy())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProfileKind {
+    Codex,
+    Claude,
+}
+
+impl ProfileKind {
+    fn from_profile_name(name: &std::ffi::OsStr) -> Option<Self> {
+        [Self::Codex, Self::Claude].into_iter().find(|kind| {
+            name.as_bytes().starts_with(kind.profile_prefix())
+                && !is_backup_like_name(name, kind.profile_prefix().len())
+        })
+    }
+
+    fn profile_prefix(self) -> &'static [u8] {
+        match self {
+            Self::Codex => b".codex",
+            Self::Claude => b".claude",
+        }
+    }
+
+    fn instruction_filename(self) -> &'static str {
+        match self {
+            Self::Codex => "AGENTS.md",
+            Self::Claude => "CLAUDE.md",
+        }
+    }
 }
 
 fn is_backup_like_name(name: &std::ffi::OsStr, prefix_length: usize) -> bool {
@@ -281,62 +405,21 @@ fn contains_ignore_ascii_case(value: &[u8], needle: &[u8]) -> bool {
         .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
-fn acquire_lock(home: &Path) -> Result<File, Error> {
-    let runtime_error = env::var_os("XDG_RUNTIME_DIR").map(|directory| {
-        let path = PathBuf::from(directory).join("agent-instructions.lock");
-        open_and_lock(&path)
-    });
-
-    if let Some(Ok(lock)) = runtime_error {
-        return Ok(lock);
-    }
-
-    let state_directory = env::var_os("XDG_STATE_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".local/state"))
-        .join("agent-instructions");
-    fs::create_dir_all(&state_directory).map_err(|error| Error {
-        message: format!(
-            "cannot create state directory {}: {error}",
-            state_directory.display()
-        ),
-    })?;
-    let fallback_path = state_directory.join("operation.lock");
-    open_and_lock(&fallback_path).map_err(|fallback_error| {
-        let message = match runtime_error {
-            Some(Err(runtime_error)) => format!(
-                "cannot acquire operation lock ({runtime_error}; fallback failed: {fallback_error})"
-            ),
-            _ => format!("cannot acquire operation lock: {fallback_error}"),
-        };
-        Error { message }
-    })
-}
-
-fn open_and_lock(path: &Path) -> Result<File, io::Error> {
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(path)?;
-    file.lock()?;
-    Ok(file)
-}
-
 fn rename_targets(
-    targets: &[(Target, Presence)],
+    managed_targets: &[(ManagedTarget, Presence)],
     desired_state: InstructionState,
 ) -> Result<(), Error> {
     let mut renames = Vec::new();
-    for (target, presence) in targets {
+    for (managed_target, presence) in managed_targets {
         let paths = match (presence, desired_state) {
-            (Presence::Enabled, InstructionState::Off) => {
-                Some((target.enabled_path(), target.disabled_path()))
-            }
-            (Presence::Disabled, InstructionState::On) => {
-                Some((target.disabled_path(), target.enabled_path()))
-            }
+            (Presence::Enabled, InstructionState::Off) => Some((
+                managed_target.enabled_path(),
+                managed_target.disabled_path(),
+            )),
+            (Presence::Disabled, InstructionState::On) => Some((
+                managed_target.disabled_path(),
+                managed_target.enabled_path(),
+            )),
             _ => None,
         };
         if let Some((source, destination)) = paths {
@@ -349,20 +432,16 @@ fn rename_targets(
 
     for rename in &renames {
         if !path_exists(&rename.source)? {
-            return Err(Error {
-                message: format!(
-                    "cannot change instruction state: source {} disappeared during preflight",
-                    rename.source.display()
-                ),
-            });
+            return Err(Error::unchanged(format!(
+                "cannot change instruction state: source {} disappeared during preflight",
+                display_path(&rename.source)
+            )));
         }
         if path_exists(&rename.destination)? {
-            return Err(Error {
-                message: format!(
-                    "cannot change instruction state: destination {} already exists",
-                    rename.destination.display()
-                ),
-            });
+            return Err(Error::unchanged(format!(
+                "cannot change instruction state: destination {} already exists",
+                display_path(&rename.destination)
+            )));
         }
     }
 
@@ -376,22 +455,26 @@ fn rename_targets(
                 {
                     rollback_failures.push(format!(
                         "{} to {}: {rollback_error}",
-                        completed_rename.destination.display(),
-                        completed_rename.source.display()
+                        display_path(&completed_rename.destination),
+                        display_path(&completed_rename.source)
                     ));
                 }
             }
-            let rollback = if rollback_failures.is_empty() {
+            let rollback_succeeded = rollback_failures.is_empty();
+            let rollback = if rollback_succeeded {
                 "completed renames were rolled back".to_owned()
             } else {
                 format!("rollback also failed: {}", rollback_failures.join("; "))
             };
-            return Err(Error {
-                message: format!(
-                    "cannot rename {} to {}: {error}; {rollback}",
-                    rename.source.display(),
-                    rename.destination.display()
-                ),
+            let message = format!(
+                "cannot rename {} to {}: {error}; {rollback}",
+                display_path(&rename.source),
+                display_path(&rename.destination)
+            );
+            return Err(if rollback_succeeded {
+                Error::unchanged(message)
+            } else {
+                Error::may_have_changed(message)
             });
         }
         completed.push(rename);
@@ -429,7 +512,7 @@ fn rename_no_replace(source: &Path, destination: &Path) -> Result<(), io::Error>
 
 struct Snapshot {
     inspection: Inspection,
-    targets: Vec<(Target, Presence)>,
+    managed_targets: Vec<(ManagedTarget, Presence)>,
 }
 
 struct Rename {
@@ -438,34 +521,36 @@ struct Rename {
 }
 
 fn home_directory() -> Result<PathBuf, Error> {
-    env::var_os("HOME").map(PathBuf::from).ok_or_else(|| Error {
-        message: "HOME is not set".to_owned(),
-    })
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| Error::unchanged("HOME is not set"))
 }
 
 #[derive(Clone)]
-struct Target {
+struct ManagedTarget {
     directory: PathBuf,
-    filename: &'static str,
-    label: String,
+    kind: ProfileKind,
+    display_label: String,
 }
 
-impl Target {
-    fn new(directory: PathBuf, filename: &'static str, label: String) -> Self {
+impl ManagedTarget {
+    fn new(directory: PathBuf, kind: ProfileKind, display_label: String) -> Self {
         Self {
             directory,
-            filename,
-            label,
+            kind,
+            display_label,
         }
     }
 
     fn enabled_path(&self) -> PathBuf {
-        self.directory.join(self.filename)
+        self.directory.join(self.kind.instruction_filename())
     }
 
     fn disabled_path(&self) -> PathBuf {
-        self.directory
-            .join(format!("{}.no-auto-inject", self.filename))
+        self.directory.join(format!(
+            "{}.no-auto-inject",
+            self.kind.instruction_filename()
+        ))
     }
 
     fn presence(&self) -> Result<Presence, Error> {
@@ -484,9 +569,10 @@ fn path_exists(path: &Path) -> Result<bool, Error> {
     match fs::symlink_metadata(path) {
         Ok(_) => Ok(true),
         Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(Error {
-            message: format!("cannot inspect {}: {error}", path.display()),
-        }),
+        Err(error) => Err(Error::unchanged(format!(
+            "cannot inspect {}: {error}",
+            display_path(path)
+        ))),
     }
 }
 
