@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Agent instructions tray
+Comment=Shows whether new agent contexts load your global instruction documents
+Exec=@BIN@ tray
+Icon=preferences-desktop-notification
+Terminal=false
+StartupNotify=false
+NoDisplay=true
+Categories=Utility;
+X-GNOME-Autostart-enabled=true
