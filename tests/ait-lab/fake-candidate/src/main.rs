@@ -62,6 +62,14 @@ fn main() {
                 std::process::exit(23);
             }
         },
+        Some("probe-read") => match args.get(1).map(fs::read).transpose() {
+            Ok(Some(_)) => println!("read outside session"),
+            Ok(None) => std::process::exit(2),
+            Err(error) => {
+                eprintln!("blocked: {error}");
+                std::process::exit(23);
+            }
+        },
         Some("tray") => loop {
             thread::sleep(Duration::from_secs(60));
         },

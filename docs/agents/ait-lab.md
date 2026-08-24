@@ -2,7 +2,7 @@
 
 Use `./ait-lab` to exercise one candidate implementation at a time without installing it into the real home directory.
 
-The lab requires Linux with a running user-systemd session, Bubblewrap, `xdg-dbus-proxy`, Rustup, `jq`, and GNU tar. The interface test also requires `dbus-daemon`.
+The lab requires Linux with a running user-systemd session, Bubblewrap, `xdg-dbus-proxy`, Rustup, Python 3, `jq`, and GNU tar. The interface test also requires `dbus-daemon`.
 
 ## Select an implementation
 

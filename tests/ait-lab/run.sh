@@ -130,6 +130,13 @@ test_use_starts_an_isolated_candidate() {
     [[ ! -e "$TEST_TEMP/outside-session" ]] || fail "the sandbox allowed a write outside its session"
 
     set +e
+    output=$(run_lab app probe-read "$TEST_ROOT/AGENTS.md" 2>&1)
+    probe_status=$?
+    set -e
+    assert_equal "23" "$probe_status" "the candidate should not read files from the source worktree"
+    assert_contains "blocked:" "$output" "the candidate should observe that the worktree is absent"
+
+    set +e
     output=$(run_lab app probe-write /lab/session/manifest.json 2>&1)
     probe_status=$?
     set -e
