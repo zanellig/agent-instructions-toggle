@@ -4,6 +4,8 @@ set -euo pipefail
 
 readonly AIT_LAB_PROJECT_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 readonly AIT_LAB_STATE_ROOT=${AIT_LAB_STATE_ROOT:-"$AIT_LAB_PROJECT_ROOT/.ait-lab-state"}
+readonly AIT_LAB_RUNTIME_ROOT=${XDG_RUNTIME_DIR:-"/run/user/$(id -u)"}
+readonly AIT_LAB_SOCKET_ROOT=${AIT_LAB_SOCKET_ROOT:-"$AIT_LAB_RUNTIME_ROOT/ait-lab"}
 readonly AIT_LAB_ACTIVE_FILE="$AIT_LAB_STATE_ROOT/active"
 readonly AIT_LAB_FIXTURES="$AIT_LAB_PROJECT_ROOT/tests/ait-lab/fixtures"
 readonly AIT_LAB_STUBS="$AIT_LAB_PROJECT_ROOT/tests/ait-lab/stubs"
@@ -31,13 +33,32 @@ require_command() {
     command -v -- "$1" >/dev/null 2>&1 || die "required command is missing: $1"
 }
 
-implementation_branch() {
-    case "$1" in
-        claude) printf 'spec-1-agent-instructions\n' ;;
-        codex-nc) printf 'issue-1-agent-instructions\n' ;;
-        codex-fc) printf 'codex/full-context-implementation\n' ;;
-        *) die "unknown implementation '$1'; expected claude, codex-nc, or codex-fc" ;;
-    esac
+validate_private_directory() {
+    local path=$1
+    local label=$2
+    local canonical permissions
+
+    [[ "$path" == /* ]] || die "$label must be an absolute path: $path"
+    [[ -d "$path" ]] || die "$label does not exist or is not a directory: $path"
+    [[ ! -L "$path" ]] || die "$label must not be a symbolic link: $path"
+    canonical=$(realpath -e -- "$path")
+    [[ "$canonical" == "$path" ]] || die "$label must not contain symbolic links or path aliases: $path"
+    [[ -O "$path" ]] || die "$label must be owned by the current user: $path"
+    permissions=$(stat -c '%a' -- "$path")
+    [[ "$permissions" == 700 ]] || die "$label must have mode 700: $path"
+}
+
+prepare_socket_root() {
+    local socket_parent
+
+    [[ "$AIT_LAB_SOCKET_ROOT" == /* ]] || die "socket directory must be an absolute path: $AIT_LAB_SOCKET_ROOT"
+    [[ "${AIT_LAB_SOCKET_ROOT##*/}" == ait-lab ]] || die "socket directory must use the dedicated ait-lab name: $AIT_LAB_SOCKET_ROOT"
+    socket_parent=$(dirname -- "$AIT_LAB_SOCKET_ROOT")
+    validate_private_directory "$socket_parent" 'socket parent directory'
+    if [[ ! -e "$AIT_LAB_SOCKET_ROOT" ]]; then
+        mkdir -- "$AIT_LAB_SOCKET_ROOT" || die "could not create socket directory: $AIT_LAB_SOCKET_ROOT"
+    fi
+    validate_private_directory "$AIT_LAB_SOCKET_ROOT" 'socket directory'
 }
 
 implementation_directory() {
@@ -51,35 +72,26 @@ implementation_directory() {
 
 implementation_override() {
     case "$1" in
-        claude) printf '%s' "${AIT_LAB_WORKTREE_CLAUDE:-}" ;;
-        codex-nc) printf '%s' "${AIT_LAB_WORKTREE_CODEX_NC:-}" ;;
-        codex-fc) printf '%s' "${AIT_LAB_WORKTREE_CODEX_FC:-}" ;;
+        claude) printf '%s' "${AIT_LAB_SOURCE_CLAUDE:-}" ;;
+        codex-nc) printf '%s' "${AIT_LAB_SOURCE_CODEX_NC:-}" ;;
+        codex-fc) printf '%s' "${AIT_LAB_SOURCE_CODEX_FC:-}" ;;
     esac
 }
 
 resolve_source() {
     local implementation=$1
-    local branch directory label override source
+    local directory label override source
 
-    branch=$(implementation_branch "$implementation")
     directory=$(implementation_directory "$implementation")
     override=$(implementation_override "$implementation")
     if [[ -n "$override" ]]; then
         source=$override
         label=$override
-    elif [[ -d "$AIT_LAB_PROJECT_ROOT/$directory" ]]; then
+    else
         source="$AIT_LAB_PROJECT_ROOT/$directory"
         label=$directory
-    else
-        source=$(git -C "$AIT_LAB_PROJECT_ROOT" worktree list --porcelain | awk \
-            -v expected="refs/heads/$branch" '
-                /^worktree / { path = substr($0, 10) }
-                /^branch / && substr($0, 8) == expected { print path; exit }
-            ')
-        label="branch:$branch"
     fi
 
-    [[ -n "$source" ]] || die "implementation source is unavailable: $implementation"
     [[ -d "$source" ]] || die "implementation source does not exist: $source"
     source=$(realpath -e -- "$source")
     [[ -f "$source/Cargo.toml" ]] || die "implementation source has no Cargo.toml: $source"
@@ -276,7 +288,7 @@ write_manifest() {
 
     if git -C "$source" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         revision=$(git -C "$source" rev-parse HEAD)
-        source_status=$(git -C "$source" status --short)
+        source_status=$(git -C "$source" status --short -- .)
     fi
     snapshot_digest=$(tar -C "$session/source" \
         --sort=name \
@@ -333,7 +345,7 @@ runtime_sandbox() {
         --bind "$session/home" /lab/session/home \
         --bind "$session/project" /lab/session/project \
         --bind "$session/xdg" /lab/session/xdg \
-        --ro-bind "$AIT_LAB_STATE_ROOT/bus" /lab/bus \
+        --ro-bind "$AIT_LAB_SOCKET_ROOT" /lab/bus \
         --unshare-all \
         --as-pid-1 \
         --clearenv \
@@ -364,7 +376,7 @@ run_active_app() {
     session=$(active_session) || die 'no active lab session; run ./ait-lab use first'
     sandbox_binary=$(jq -r '.sandboxBinary' "$session/manifest.json")
     proxy_name=$(<"$session/runtime/dbus-socket-name")
-    proxy_socket="$AIT_LAB_STATE_ROOT/bus/$proxy_name"
+    proxy_socket="$AIT_LAB_SOCKET_ROOT/$proxy_name"
     [[ -S "$proxy_socket" ]] || die 'the active session bus proxy is not running'
     mapfile -d '' -t sandbox < <(runtime_sandbox "$session")
     "${sandbox[@]}" \
@@ -516,11 +528,11 @@ start_session() {
     [[ -n "$bus_address" ]] || die 'DBUS_SESSION_BUS_ADDRESS is not set; a live session bus is required for the tray'
     sandbox_binary=$(jq -r '.sandboxBinary' "$session/manifest.json")
     rm -f -- "$session/runtime/ready"
-    mkdir -p -- "$AIT_LAB_STATE_ROOT/bus"
+    prepare_socket_root
     proxy_hash=$(printf '%s' "$session" | sha256sum)
     proxy_name="${proxy_hash%% *}"
     proxy_name="${proxy_name:0:16}.sock"
-    proxy_socket="$AIT_LAB_STATE_ROOT/bus/$proxy_name"
+    proxy_socket="$AIT_LAB_SOCKET_ROOT/$proxy_name"
     sandbox_bus_address="unix:path=/lab/bus/$proxy_name"
     printf '%s\n' "$proxy_name" > "$session/runtime/dbus-socket-name"
     supervisor_unit="ait-lab-${proxy_name%.sock}-$$.service"
@@ -529,6 +541,7 @@ start_session() {
     systemd-run --user --quiet --collect \
         --unit "$supervisor_unit" \
         --setenv "AIT_LAB_STATE_ROOT=$AIT_LAB_STATE_ROOT" \
+        --setenv "AIT_LAB_SOCKET_ROOT=$AIT_LAB_SOCKET_ROOT" \
         "$AIT_LAB_PROJECT_ROOT/ait-lab" __supervise \
         "$session" "$sandbox_binary" "$bus_address" "$proxy_socket" "$sandbox_bus_address" \
         </dev/null >> "$session/logs/supervisor.log" 2>&1 \
@@ -579,7 +592,10 @@ use_implementation() {
     require_command bwrap
     require_command jq
     require_command sha256sum
+    require_command stat
     require_command tar
+    umask 077
+    prepare_socket_root
     mapfile -t source_details < <(resolve_source "$implementation")
     ((${#source_details[@]} == 2)) || die "failed to resolve implementation source: $implementation"
     source=${source_details[0]}
@@ -590,7 +606,6 @@ use_implementation() {
     cargo_cache="$AIT_LAB_STATE_ROOT/cargo-home"
     rust_toolchain=$(toolchain_root)
 
-    umask 077
     mkdir -p -- "$session" "$build_target" "$cargo_cache"
     seed_session "$session"
     snapshot_source "$source" "$session"
@@ -672,8 +687,9 @@ if [[ "${1:-}" == __supervise ]]; then
     [[ $# -eq 6 ]] || exit 2
     AIT_LAB_INTERNAL_SESSION=$(validate_session_directory "$2")
     [[ "$3" == "$(jq -r '.sandboxBinary' "$AIT_LAB_INTERNAL_SESSION/manifest.json")" ]] || exit 2
+    prepare_socket_root
     case "$(realpath -m -- "$5")" in
-        "$(realpath -m -- "$AIT_LAB_STATE_ROOT")"/bus/*.sock) ;;
+        "$(realpath -m -- "$AIT_LAB_SOCKET_ROOT")"/*.sock) ;;
         *) exit 2 ;;
     esac
     [[ "$6" == "unix:path=/lab/bus/$(basename -- "$5")" ]] || exit 2

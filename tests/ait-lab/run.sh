@@ -5,7 +5,8 @@ set -euo pipefail
 readonly TEST_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 readonly LAB="$TEST_ROOT/ait-lab"
 readonly TEST_TEMP=$(mktemp -d)
-readonly TEST_STATE="$TEST_TEMP/playground/agent-instructions-toggle/.ait-lab-state"
+readonly TEST_STATE="$TEST_TEMP/playground/agent-instructions-toggle-with-a-deliberately-long-checkout-name-for-unix-socket-regression/.ait-lab-state"
+readonly TEST_RUNTIME="$TEST_TEMP/runtime"
 readonly FAKE_CANDIDATE="$TEST_ROOT/tests/ait-lab/fake-candidate"
 readonly FAKE_CLAUDE="$TEST_ROOT/tests/ait-lab/fake-claude"
 LAB_BUS_PID=""
@@ -73,9 +74,10 @@ assert_session_stopped() {
 
 run_lab() {
     AIT_LAB_STATE_ROOT="$TEST_STATE" \
-    AIT_LAB_WORKTREE_CLAUDE="$FAKE_CANDIDATE" \
-    AIT_LAB_WORKTREE_CODEX_NC="$FAKE_CANDIDATE" \
-    AIT_LAB_WORKTREE_CODEX_FC="$FAKE_CANDIDATE" \
+    AIT_LAB_SOCKET_ROOT="$TEST_RUNTIME/ait-lab" \
+    AIT_LAB_SOURCE_CLAUDE="$FAKE_CANDIDATE" \
+    AIT_LAB_SOURCE_CODEX_NC="$FAKE_CANDIDATE" \
+    AIT_LAB_SOURCE_CODEX_FC="$FAKE_CANDIDATE" \
     AIT_LAB_CLAUDE_EXECUTABLE="$FAKE_CLAUDE" \
     AIT_LAB_SESSION_BUS_ADDRESS="$LAB_BUS_ADDRESS" \
         "$LAB" "$@"
@@ -89,6 +91,25 @@ start_test_bus() {
     LAB_BUS_PID=${details[1]}
 }
 
+assert_socket_root_rejected() {
+    local socket_directory=$1
+    local expected_error=$2
+    local lab=$3
+    local state=$4
+    local output status
+
+    set +e
+    output=$(AIT_LAB_STATE_ROOT="$state" \
+        AIT_LAB_SOCKET_ROOT="$socket_directory" \
+        AIT_LAB_CLAUDE_EXECUTABLE="$FAKE_CLAUDE" \
+        AIT_LAB_SESSION_BUS_ADDRESS="$LAB_BUS_ADDRESS" \
+        "$lab" use claude 2>&1)
+    status=$?
+    set -e
+    assert_equal "1" "$status" "use should reject an unsafe socket directory"
+    assert_contains "$expected_error" "$output" "use should explain why the socket directory is unsafe"
+}
+
 test_show_reports_no_active_session() {
     local output
 
@@ -97,25 +118,51 @@ test_show_reports_no_active_session() {
 }
 
 test_use_starts_an_isolated_candidate() {
-    local output claude_session final_session local_lab local_project local_state
+    local output claude_session final_session local_lab local_project local_state probe_status
+    local private_runtime public_runtime runtime_link
 
+    mkdir -p "$TEST_RUNTIME"
+    chmod 700 "$TEST_RUNTIME"
     start_test_bus
     local_project="$TEST_TEMP/local-project"
     local_lab="$local_project/ait-lab"
     local_state="$TEST_TEMP/local-state"
-    mkdir -p "$local_project/implementations" "$local_project/tests"
+    mkdir -p "$local_project/implementations/claude" "$local_project/tests"
     cp "$LAB" "$local_lab"
-    ln -s "$FAKE_CANDIDATE" "$local_project/implementations/claude"
+    cp "$FAKE_CANDIDATE/Cargo.lock" "$FAKE_CANDIDATE/Cargo.toml" \
+        "$FAKE_CANDIDATE/install.sh" "$local_project/implementations/claude/"
+    cp -a "$FAKE_CANDIDATE/src" "$local_project/implementations/claude/src"
     ln -s "$TEST_ROOT/tests/ait-lab" "$local_project/tests/ait-lab"
+    git -C "$local_project" init -q
+    git -C "$local_project" add .
+    git -C "$local_project" -c user.name=ait-lab -c user.email=ait-lab.invalid \
+        -c commit.gpgsign=false commit -qm "test fixture"
+    printf 'unrelated change\n' > "$local_project/unrelated.txt"
+
+    assert_socket_root_rejected "relative-runtime/ait-lab" "socket directory must be an absolute path" "$local_lab" "$local_state"
+    private_runtime="$TEST_TEMP/private-runtime"
+    runtime_link="$private_runtime/ait-lab"
+    mkdir "$private_runtime"
+    chmod 700 "$private_runtime"
+    mkdir "$TEST_TEMP/private-runtime-target"
+    chmod 700 "$TEST_TEMP/private-runtime-target"
+    ln -s "$TEST_TEMP/private-runtime-target" "$runtime_link"
+    assert_socket_root_rejected "$runtime_link" "socket directory must not be a symbolic link" "$local_lab" "$local_state"
+    public_runtime="$TEST_TEMP/public-runtime"
+    mkdir "$public_runtime"
+    chmod 755 "$public_runtime"
+    assert_socket_root_rejected "$public_runtime/ait-lab" "socket parent directory must have mode 700" "$local_lab" "$local_state"
 
     output=$(AIT_LAB_STATE_ROOT="$local_state" \
+        AIT_LAB_SOCKET_ROOT="$TEST_RUNTIME/ait-lab" \
         AIT_LAB_CLAUDE_EXECUTABLE="$FAKE_CLAUDE" \
         AIT_LAB_SESSION_BUS_ADDRESS="$LAB_BUS_ADDRESS" \
         "$local_lab" use claude)
     assert_contains "from implementations/claude" "$output" "use should select an in-repo implementation"
-    output=$(AIT_LAB_STATE_ROOT="$local_state" "$local_lab" show)
+    output=$(AIT_LAB_STATE_ROOT="$local_state" AIT_LAB_SOCKET_ROOT="$TEST_RUNTIME/ait-lab" "$local_lab" show)
+    AIT_LAB_STATE_ROOT="$local_state" AIT_LAB_SOCKET_ROOT="$TEST_RUNTIME/ait-lab" "$local_lab" stop >/dev/null
     assert_contains "Source: implementations/claude" "$output" "show should report the in-repo source"
-    AIT_LAB_STATE_ROOT="$local_state" "$local_lab" stop >/dev/null
+    assert_contains "Source tree: clean" "$output" "show should scope dirtiness to the selected project"
 
     output=$(run_lab use claude)
     assert_contains "Using claude" "$output" "use should report the selected implementation"
@@ -137,7 +184,6 @@ test_use_starts_an_isolated_candidate() {
     output=$(run_lab claude)
     assert_equal "/lab/session/home" "$output" "claude should run with the synthetic home"
 
-    local probe_status
     set +e
     output=$(run_lab app probe-write "$TEST_TEMP/outside-session" 2>&1)
     probe_status=$?
@@ -150,8 +196,8 @@ test_use_starts_an_isolated_candidate() {
     output=$(run_lab app probe-read "$TEST_ROOT/AGENTS.md" 2>&1)
     probe_status=$?
     set -e
-    assert_equal "23" "$probe_status" "the candidate should not read files from the source worktree"
-    assert_contains "blocked:" "$output" "the candidate should observe that the worktree is absent"
+    assert_equal "23" "$probe_status" "the candidate should not read files from the repository checkout"
+    assert_contains "blocked:" "$output" "the candidate should observe that the checkout is absent"
 
     set +e
     output=$(run_lab app probe-write /lab/session/manifest.json 2>&1)
