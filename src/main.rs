@@ -2,6 +2,7 @@
 compile_error!("agent-instructions supports Linux only");
 
 mod locks;
+mod output;
 mod state;
 mod tray;
 
@@ -17,7 +18,7 @@ fn main() {
                 print_warnings(&inspection);
             }
             Err(error) => {
-                eprintln!("agent-instructions: {error}");
+                eprintln!("agent-instructions: {}", output::text(&error.to_string()));
                 std::process::exit(1);
             }
         }
@@ -37,7 +38,7 @@ fn main() {
 
     if operation.as_deref() == Some(std::ffi::OsStr::new("tray")) && args.next().is_none() {
         if let Err(error) = tray::run() {
-            eprintln!("agent-instructions: {error}");
+            eprintln!("agent-instructions: {}", output::text(&error));
             std::process::exit(1);
         }
         return;
@@ -70,7 +71,10 @@ fn run_mutation(operation: state::Operation) {
             std::process::exit(1);
         }
         Err(state::ApplyError::Operational(error)) => {
-            let message = format!("The instruction-state change failed: {error}");
+            let message = format!(
+                "The instruction-state change failed: {}",
+                output::text(&error)
+            );
             eprintln!("agent-instructions: {message}");
             notify_best_effort("Agent instruction change failed", &message);
             std::process::exit(1);

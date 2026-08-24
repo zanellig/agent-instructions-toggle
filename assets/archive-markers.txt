@@ -1,0 +1,8 @@
+bak
+backup
+archive
+old
+orig
+copy
+save
+disabled

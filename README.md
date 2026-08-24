@@ -6,10 +6,10 @@ The change applies when a new context starts. An existing Codex terminal session
 
 ## Managed profiles
 
-The utility discovers immediate child directories of `$HOME` whose names use these forms:
+The utility discovers immediate child directories of `$HOME` whose names begin with these prefixes:
 
-- `.codex`, `.codex_*`, `.codex-*`, and `.codex.*` contain `AGENTS.md`.
-- `.claude`, `.claude_*`, `.claude-*`, and `.claude.*` contain `CLAUDE.md`.
+- `.codex` directories contain `AGENTS.md`, including profiles such as `.codex_work` and `.codex2`.
+- `.claude` directories contain `CLAUDE.md`, including profiles such as `.claude_work` and `.claude2`.
 
 Names that look archived are excluded. The ignored markers are `bak`, `backup`, `archive`, `old`, `orig`, `copy`, `save`, and `disabled`, including common variants such as `.codex_personal.bak`, `.codex_backup2`, and an editor `~` suffix. Discovery happens on every operation, so adding an active profile does not require a configuration change.
 
@@ -52,7 +52,7 @@ The installer requires a stable Rust toolchain and Python 3.
 
 It builds the locked release, copies the binary to `~/.local/bin`, installs application and autostart desktop entries, registers `Meta+Ctrl+Shift+A` through the desktop entry, refreshes KDE service metadata, and validates the entries when `desktop-file-validate` is available.
 
-If `~/.claude` exists, the installer extends its configured status-line command. It preserves the previous command and appends `AGENTS:on`, `AGENTS:off`, `AGENTS:mixed`, or `AGENTS:conflict` to its output. The wrapper passes Claude's session input to the existing command and does not add Git polling.
+For each discovered Claude profile, the installer extends its configured status-line command. It preserves that profile's previous command and appends `AGENTS:on`, `AGENTS:off`, `AGENTS:mixed`, or `AGENTS:conflict` to its output. The wrapper passes Claude's session input to the existing command and does not add Git polling. Archive-looking Claude directories are left untouched.
 
 Notification delivery uses the desktop notification service and is best effort. A missing notification service does not change the result of a successful rename.
 

@@ -5,8 +5,20 @@ import sys
 from pathlib import Path
 
 
+def safe_message(value: object) -> str:
+    rendered = []
+    for character in str(value):
+        if not character.isprintable() or character in "<>&":
+            rendered.append(f"\\u{{{ord(character):x}}}")
+        else:
+            rendered.append(character)
+    return "".join(rendered)
+
+
 def main() -> int:
-    config_path = Path(__file__).with_name("claude-status-line.json")
+    config_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).with_name(
+        "claude-status-line.json"
+    )
     try:
         config = json.loads(config_path.read_text(encoding="utf-8"))
         binary = config["binary"]
@@ -16,7 +28,10 @@ def main() -> int:
         if not isinstance(base_command, str):
             raise TypeError("base command must be a string")
     except (OSError, ValueError, KeyError, TypeError) as error:
-        print(f"agent-instructions status line: invalid installation: {error}", file=sys.stderr)
+        print(
+            f"agent-instructions status line: invalid installation: {safe_message(error)}",
+            file=sys.stderr,
+        )
         return 1
 
     payload = sys.stdin.buffer.read()
@@ -34,7 +49,7 @@ def main() -> int:
             base_output = base.stdout.rstrip(b"\n")
             sys.stderr.buffer.write(base.stderr)
         except OSError as error:
-            print(f"existing status line failed: {error}", file=sys.stderr)
+            print(f"existing status line failed: {safe_message(error)}", file=sys.stderr)
 
     try:
         status = subprocess.run(

@@ -31,7 +31,7 @@ if [[ -z "$binary_source" ]]; then
   binary_source="$source_dir/target/release/agent-instructions"
 fi
 if [[ ! -f "$binary_source" ]]; then
-  echo "install.sh: binary not found: $binary_source" >&2
+  echo "install.sh: binary not found" >&2
   exit 1
 fi
 
@@ -64,6 +64,5 @@ if [[ "$refresh_desktop" == true ]]; then
   fi
 fi
 
-echo "Installed agent-instructions at $installed_binary"
+echo "Installed agent-instructions."
 echo "The KDE shortcut is Meta+Ctrl+Shift+A. It affects new agent contexts only."
-

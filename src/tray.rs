@@ -117,7 +117,7 @@ pub fn run() -> Result<(), String> {
             format!("could not start the tray indicator: {error}")
         }
     })?;
-    let inspection = state::inspect().map_err(|error| error.to_string())?;
+    let inspection = state::inspect().map_err(|error| crate::output::text(&error.to_string()))?;
     let (sender, receiver) = mpsc::channel();
     let indicator = Indicator {
         inspection: inspection.clone(),
@@ -126,7 +126,7 @@ pub fn run() -> Result<(), String> {
     let handle = indicator
         .assume_sni_available(true)
         .spawn()
-        .map_err(|error| format!("could not register the tray indicator: {error}"))?;
+        .map_err(|_| "could not register the tray indicator".to_owned())?;
     let mut watcher = watcher_for(&inspection, &sender)?;
 
     event_loop(&receiver, &sender, &handle, &mut watcher);
@@ -161,7 +161,10 @@ fn event_loop(
                 }
             }
             TrayEvent::Filesystem(Err(error)) => {
-                eprintln!("agent-instructions: could not observe an instruction document: {error}");
+                eprintln!(
+                    "agent-instructions: could not observe an instruction document: {}",
+                    crate::output::text(&error.to_string())
+                );
             }
             TrayEvent::Quit => break,
         }
@@ -219,11 +222,22 @@ fn watcher_for(
     let mut watcher = notify::recommended_watcher(move |event| {
         let _ = event_sender.send(TrayEvent::Filesystem(event));
     })
-    .map_err(|error| format!("could not observe instruction documents: {error}"))?;
+    .map_err(|error| {
+        format!(
+            "could not observe instruction documents: {}",
+            crate::output::text(&error.to_string())
+        )
+    })?;
     for directory in inspection.watch_directories() {
         watcher
             .watch(&directory, RecursiveMode::NonRecursive)
-            .map_err(|error| format!("could not observe {}: {error}", directory.display()))?;
+            .map_err(|error| {
+                format!(
+                    "could not observe {}: {error}",
+                    crate::output::path(&directory),
+                    error = crate::output::text(&error.to_string())
+                )
+            })?;
     }
     Ok(watcher)
 }

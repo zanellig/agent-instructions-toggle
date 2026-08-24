@@ -75,6 +75,26 @@ fn installer_copies_the_binary_and_extends_the_existing_status_line() {
         ),
     )
     .expect("write Claude settings");
+    let work_home = installation.home.join(".claude_work");
+    fs::create_dir(&work_home).expect("create second Claude profile");
+    fs::write(work_home.join("CLAUDE.md"), "work instructions\n").expect("write work instructions");
+    let work_status = work_home.join("work-status.sh");
+    fs::write(&work_status, "cat >/dev/null\nprintf 'PROFILE:work\\n'\n")
+        .expect("write work status line");
+    fs::write(
+        work_home.join("settings.json"),
+        format!(
+            "{{\"statusLine\": {{\"type\": \"command\", \"command\": \"bash {}\"}}}}\n",
+            work_status.display()
+        ),
+    )
+    .expect("write work settings");
+    let backup_home = installation.home.join(".claude_backup");
+    fs::create_dir(&backup_home).expect("create backup Claude profile");
+    fs::write(backup_home.join("CLAUDE.md"), "backup instructions\n")
+        .expect("write backup instructions");
+    fs::write(backup_home.join("settings.json"), "{\"backup\": true}\n")
+        .expect("write backup settings");
 
     let output = installation.install();
     assert!(
@@ -106,17 +126,31 @@ fn installer_copies_the_binary_and_extends_the_existing_status_line() {
     let settings = fs::read_to_string(installation.home.join(".claude/settings.json")).unwrap();
     assert!(settings.contains("\"theme\": \"dark\""));
     assert!(settings.contains("claude-status-line.py"));
+    assert!(
+        fs::read_to_string(work_home.join("settings.json"))
+            .unwrap()
+            .contains("claude-status-line.py")
+    );
+    assert_eq!(
+        fs::read_to_string(backup_home.join("settings.json")).unwrap(),
+        "{\"backup\": true}\n"
+    );
 
-    let first_status = run_status_line(&installation);
+    let first_status = run_status_line(&installation, "existing-status.sh");
     assert!(first_status.status.success());
     assert_eq!(
         String::from_utf8(first_status.stdout).unwrap(),
         "MODEL:Opus repo:demo AGENTS:on\n"
     );
+    let work_output = run_status_line(&installation, "work-status.sh");
+    assert_eq!(
+        String::from_utf8(work_output.stdout).unwrap(),
+        "PROFILE:work AGENTS:on\n"
+    );
 
     let reinstall = installation.install();
     assert!(reinstall.status.success());
-    let second_status = run_status_line(&installation);
+    let second_status = run_status_line(&installation, "existing-status.sh");
     assert_eq!(
         String::from_utf8(second_status.stdout).unwrap(),
         "MODEL:Opus repo:demo AGENTS:on\n"
@@ -136,6 +170,11 @@ fn installer_copies_the_binary_and_extends_the_existing_status_line() {
         installation.home.join(".claude/CLAUDE.md.no-auto-inject"),
     )
     .expect("make state off");
+    fs::rename(
+        work_home.join("CLAUDE.md"),
+        work_home.join("CLAUDE.md.no-auto-inject"),
+    )
+    .expect("disable work profile");
     assert_status_line(&installation, "off");
 
     validate_desktop_file(&application);
@@ -158,7 +197,7 @@ fn installer_refuses_invalid_claude_settings_without_overwriting_them() {
 }
 
 fn assert_status_line(installation: &Installation, expected_state: &str) {
-    let output = run_status_line(installation);
+    let output = run_status_line(installation, "existing-status.sh");
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
@@ -166,12 +205,24 @@ fn assert_status_line(installation: &Installation, expected_state: &str) {
     );
 }
 
-fn run_status_line(installation: &Installation) -> std::process::Output {
+fn run_status_line(installation: &Installation, config_match: &str) -> std::process::Output {
     let wrapper = installation
         .data_home()
         .join("agent-instructions/claude-status-line.py");
+    let config = fs::read_dir(installation.data_home().join("agent-instructions"))
+        .expect("read installed status configurations")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.extension().and_then(|extension| extension.to_str()) == Some("json")
+                && fs::read_to_string(path)
+                    .map(|contents| contents.contains(config_match))
+                    .unwrap_or(false)
+        })
+        .expect("find profile status configuration");
     let mut child = Command::new("python3")
         .arg(wrapper)
+        .arg(config)
         .env("HOME", &installation.home)
         .env("XDG_RUNTIME_DIR", installation.home.join("runtime"))
         .env("XDG_STATE_HOME", installation.home.join("state"))

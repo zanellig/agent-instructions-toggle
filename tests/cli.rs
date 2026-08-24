@@ -453,6 +453,7 @@ fn profiles_are_discovered_while_backup_directories_are_ignored() {
     let backups = [
         ".codex_backup/AGENTS.md",
         ".codex_backup2/AGENTS.md",
+        ".codexPersonalBackup/AGENTS.md",
         ".codex-personal.bak/AGENTS.md",
         ".codex.old/AGENTS.md",
         ".codex_orig/AGENTS.md",
@@ -461,6 +462,7 @@ fn profiles_are_discovered_while_backup_directories_are_ignored() {
         ".codex_disabled/AGENTS.md",
         ".codex_p2~/AGENTS.md",
         ".claude_archive/CLAUDE.md",
+        ".claude_mybackup/CLAUDE.md",
     ];
     for backup in backups {
         let path = home.root.join(backup);
@@ -498,4 +500,13 @@ fn profile_labels_escape_terminal_controls_and_tooltip_markup() {
     assert!(!stderr.contains('\u{1b}'));
     assert!(!stderr.contains("\n<b&>"));
     assert!(stderr.contains("\\u{1b}[31m\\n\\u{3c}b\\u{26}\\u{3e}"));
+
+    fs::create_dir(home.root.join(hostile_name).join("AGENTS.md"))
+        .expect("replace missing document with a directory");
+    let mutation = home.command("disable");
+    let mutation_error = text(&mutation.stderr);
+    assert!(!mutation.status.success());
+    assert!(!mutation_error.contains('\u{1b}'));
+    assert!(!mutation_error.contains("\n<b&>"));
+    assert!(mutation_error.contains("\\u{1b}[31m\\n\\u{3c}b\\u{26}\\u{3e}"));
 }

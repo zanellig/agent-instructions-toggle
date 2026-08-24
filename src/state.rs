@@ -216,7 +216,7 @@ fn inspect_home(home: &Path) -> io::Result<Inspection> {
         };
         let relative = active.strip_prefix(home).unwrap_or(&active);
         targets.push(ManagedTarget {
-            label: safe_target_label(relative),
+            label: format!("~/{}", crate::output::path(relative)),
             active,
             disabled,
             status,
@@ -273,35 +273,11 @@ fn looks_archived(suffix: &str) -> bool {
     if suffix.ends_with('~') {
         return true;
     }
-    suffix
-        .to_ascii_lowercase()
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|part| !part.is_empty())
-        .any(|part| {
-            [
-                "backup", "backups", "bak", "archive", "archived", "old", "orig", "copy", "save",
-                "disabled",
-            ]
-            .iter()
-            .any(|marker| part == *marker || part.starts_with(marker))
-        })
-}
-
-fn safe_target_label(relative: &Path) -> String {
-    let mut label = String::from("~/");
-    for character in relative.to_string_lossy().chars() {
-        if character.is_control() {
-            label.extend(character.escape_default());
-        } else {
-            match character {
-                '<' => label.push_str("\\u{3c}"),
-                '>' => label.push_str("\\u{3e}"),
-                '&' => label.push_str("\\u{26}"),
-                _ => label.push(character),
-            }
-        }
-    }
-    label
+    let suffix = suffix.to_ascii_lowercase();
+    include_str!("../assets/archive-markers.txt")
+        .lines()
+        .filter(|marker| !marker.is_empty())
+        .any(|marker| suffix.contains(marker))
 }
 
 fn rename_targets(inspection: &Inspection, desired: InstructionState) -> Result<(), ApplyError> {
@@ -325,19 +301,19 @@ fn rename_targets(inspection: &Inspection, desired: InstructionState) -> Result<
         let source = fs::symlink_metadata(&plan.from).map_err(|error| {
             ApplyError::Operational(format!(
                 "preflight could not inspect {}: {error}",
-                plan.from.display()
+                crate::output::path(&plan.from)
             ))
         })?;
         if !source.file_type().is_file() && !source.file_type().is_symlink() {
             return Err(ApplyError::Operational(format!(
                 "preflight rejected {} because it is not a document",
-                plan.from.display()
+                crate::output::path(&plan.from)
             )));
         }
         if path_exists(&plan.to).map_err(operational_error)? {
             return Err(ApplyError::Operational(format!(
                 "preflight refused to overwrite {}",
-                plan.to.display()
+                crate::output::path(&plan.to)
             )));
         }
     }
@@ -354,8 +330,8 @@ fn rename_targets(inspection: &Inspection, desired: InstructionState) -> Result<
             let rollback_failures = rollback(&completed);
             let mut message = format!(
                 "could not rename {} to {}: {error}",
-                plan.from.display(),
-                plan.to.display()
+                crate::output::path(&plan.from),
+                crate::output::path(&plan.to)
             );
             if !rollback_failures.is_empty() {
                 message.push_str("; rollback also failed: ");
@@ -381,8 +357,8 @@ fn rollback(completed: &[RenamePlan]) -> Vec<String> {
         if let Err(error) = rename_without_overwrite(&plan.to, &plan.from) {
             failures.push(format!(
                 "{} to {}: {error}",
-                plan.to.display(),
-                plan.from.display()
+                crate::output::path(&plan.to),
+                crate::output::path(&plan.from)
             ));
         }
     }
@@ -425,7 +401,7 @@ fn rename_without_overwrite(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 fn operational_error(error: io::Error) -> ApplyError {
-    ApplyError::Operational(error.to_string())
+    ApplyError::Operational(crate::output::text(&error.to_string()))
 }
 
 #[cfg(debug_assertions)]
