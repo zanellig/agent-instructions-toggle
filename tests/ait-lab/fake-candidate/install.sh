@@ -25,6 +25,7 @@ else
     installed_binary="${XDG_BIN_HOME:?}/agent-instructions"
 fi
 install -Dm755 -- "$binary_source" "$installed_binary"
+printf '%s\n' "$AIT_LAB_IMPLEMENTATION" > "${HOME}/.ait-lab-implementation"
 
 status_wrapper="${HOME}/.claude/fake-statusline.sh"
 cat > "$status_wrapper" <<EOF

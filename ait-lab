@@ -9,6 +9,16 @@ readonly AIT_LAB_SOCKET_ROOT=${AIT_LAB_SOCKET_ROOT:-"$AIT_LAB_RUNTIME_ROOT/ait-l
 readonly AIT_LAB_ACTIVE_FILE="$AIT_LAB_STATE_ROOT/active"
 readonly AIT_LAB_FIXTURES="$AIT_LAB_PROJECT_ROOT/tests/ait-lab/fixtures"
 readonly AIT_LAB_STUBS="$AIT_LAB_PROJECT_ROOT/tests/ait-lab/stubs"
+readonly AIT_LAB_HOST_DATA_HOME=${AIT_LAB_HOST_DATA_HOME:-"${XDG_DATA_HOME:-${HOME:?HOME is not set}/.local/share}"}
+readonly AIT_LAB_HOST_SHORTCUT_COMPONENT=ait-lab-agent-instructions-toggle.desktop
+readonly AIT_LAB_HOST_SHORTCUT_ACTION=_launch
+# Qt::META | Qt::CTRL | Qt::SHIFT | Qt::Key_A, used by KGlobalAccel's D-Bus query.
+readonly AIT_LAB_HOST_SHORTCUT_QT_KEY=369098817
+readonly AIT_LAB_HOST_DESKTOP="$AIT_LAB_HOST_DATA_HOME/applications/$AIT_LAB_HOST_SHORTCUT_COMPONENT"
+readonly AIT_LAB_HOST_STATE="$AIT_LAB_STATE_ROOT/host-shortcut"
+readonly AIT_LAB_HOST_LAUNCHER="$AIT_LAB_HOST_STATE/shortcut"
+readonly AIT_LAB_HOST_RECORD="$AIT_LAB_HOST_STATE/registration.json"
+readonly AIT_LAB_HOST_REFRESH_LOG="$AIT_LAB_STATE_ROOT/host-shortcut-refresh.log"
 AIT_LAB_SUPERVISED_SESSION=""
 AIT_LAB_SUPERVISED_PROXY_SOCKET=""
 AIT_LAB_SUPERVISED_PROXY_PID=""
@@ -16,8 +26,9 @@ AIT_LAB_SUPERVISED_TRAY_PID=""
 
 usage() {
     printf '%s\n' \
-        'usage: ./ait-lab use <claude|codex-nc|codex-fc>' \
+        'usage: ./ait-lab use <claude|codex-nc|codex-fc> [--no-plasma-shortcut]' \
         '       ./ait-lab app <arguments...>' \
+        '       ./ait-lab shortcut' \
         '       ./ait-lab statusline <fixture>' \
         '       ./ait-lab claude' \
         '       ./ait-lab show' \
@@ -126,6 +137,288 @@ write_active_session() {
     mkdir -p -- "$AIT_LAB_STATE_ROOT"
     printf '%s\n' "$session" > "$temporary"
     mv -f -- "$temporary" "$AIT_LAB_ACTIVE_FILE"
+}
+
+find_qdbus() {
+    local executable=${AIT_LAB_QDBUS:-}
+
+    if [[ -z "$executable" ]]; then
+        executable=$(command -v qdbus6 || command -v qdbus || true)
+    fi
+    [[ -n "$executable" && -x "$executable" ]] || return 1
+    printf '%s\n' "$executable"
+}
+
+find_kbuildsycoca() {
+    local executable=${AIT_LAB_KBUILDSYCOCA:-}
+
+    if [[ -z "$executable" ]]; then
+        executable=$(command -v kbuildsycoca6 || command -v kbuildsycoca5 || true)
+    fi
+    [[ -n "$executable" && -x "$executable" ]] || return 1
+    printf '%s\n' "$executable"
+}
+
+host_shortcut_artifacts_exist() {
+    [[ -e "$AIT_LAB_HOST_DESKTOP" || -L "$AIT_LAB_HOST_DESKTOP" \
+        || -e "$AIT_LAB_HOST_LAUNCHER" || -L "$AIT_LAB_HOST_LAUNCHER" \
+        || -e "$AIT_LAB_HOST_RECORD" || -L "$AIT_LAB_HOST_RECORD" ]]
+}
+
+host_shortcut_artifacts_owned() {
+    [[ -f "$AIT_LAB_HOST_RECORD" && ! -L "$AIT_LAB_HOST_RECORD" ]] || return 1
+    jq -e \
+        --arg projectRoot "$AIT_LAB_PROJECT_ROOT" \
+        --arg desktop "$AIT_LAB_HOST_DESKTOP" \
+        --arg launcher "$AIT_LAB_HOST_LAUNCHER" \
+        --arg component "$AIT_LAB_HOST_SHORTCUT_COMPONENT" \
+        --arg action "$AIT_LAB_HOST_SHORTCUT_ACTION" \
+        '.projectRoot == $projectRoot
+            and .desktop == $desktop
+            and .launcher == $launcher
+            and .component == $component
+            and .action == $action' \
+        "$AIT_LAB_HOST_RECORD" >/dev/null 2>&1 || return 1
+
+    if [[ -e "$AIT_LAB_HOST_DESKTOP" || -L "$AIT_LAB_HOST_DESKTOP" ]]; then
+        [[ -f "$AIT_LAB_HOST_DESKTOP" && ! -L "$AIT_LAB_HOST_DESKTOP" ]] || return 1
+        grep -Fqx -- "X-AIT-Lab-Project=$AIT_LAB_PROJECT_ROOT" "$AIT_LAB_HOST_DESKTOP" \
+            || return 1
+    fi
+    if [[ -e "$AIT_LAB_HOST_LAUNCHER" || -L "$AIT_LAB_HOST_LAUNCHER" ]]; then
+        [[ -f "$AIT_LAB_HOST_LAUNCHER" && ! -L "$AIT_LAB_HOST_LAUNCHER" ]] || return 1
+        grep -Fqx -- "# AIT-Lab-Project: $AIT_LAB_PROJECT_ROOT" "$AIT_LAB_HOST_LAUNCHER" \
+            || return 1
+    fi
+}
+
+read_shortcut_owner() {
+    local qdbus=$1
+
+    "$qdbus" \
+        org.kde.kglobalaccel \
+        /kglobalaccel \
+        org.kde.KGlobalAccel.action \
+        "$AIT_LAB_HOST_SHORTCUT_QT_KEY"
+}
+
+preflight_host_shortcut() {
+    local qdbus owner_output friendly
+    local -a owner=()
+
+    [[ "$AIT_LAB_HOST_DATA_HOME" == /* ]] \
+        || die "host data directory must be an absolute path: $AIT_LAB_HOST_DATA_HOME"
+    [[ "$AIT_LAB_PROJECT_ROOT" != *$'\n'* && "$AIT_LAB_PROJECT_ROOT" != *$'\r'* \
+        && "$AIT_LAB_HOST_DESKTOP" != *$'\n'* && "$AIT_LAB_HOST_DESKTOP" != *$'\r'* \
+        && "$AIT_LAB_HOST_LAUNCHER" != *$'\n'* && "$AIT_LAB_HOST_LAUNCHER" != *$'\r'* ]] \
+        || die 'lab paths cannot contain newlines when Plasma shortcut registration is enabled'
+    [[ ! -L "$AIT_LAB_HOST_STATE" ]] \
+        || die "host shortcut state directory must not be a symbolic link: $AIT_LAB_HOST_STATE"
+    [[ ! -e "$AIT_LAB_HOST_STATE" || -d "$AIT_LAB_HOST_STATE" ]] \
+        || die "host shortcut state path is not a directory: $AIT_LAB_HOST_STATE"
+    find_kbuildsycoca >/dev/null \
+        || die 'Plasma shortcut registration requires kbuildsycoca6 or kbuildsycoca5'
+    qdbus=$(find_qdbus) \
+        || die 'Plasma shortcut registration requires qdbus6 or qdbus'
+
+    if host_shortcut_artifacts_exist && ! host_shortcut_artifacts_owned; then
+        die "will not overwrite host shortcut files not owned by this lab: $AIT_LAB_HOST_DESKTOP"
+    fi
+
+    if ! owner_output=$(read_shortcut_owner "$qdbus"); then
+        die 'could not query the live Plasma shortcut registry'
+    fi
+    if [[ -n "$owner_output" ]]; then
+        mapfile -t owner <<< "$owner_output"
+    fi
+    if ((${#owner[@]} > 0)) \
+        && [[ "${owner[0]}" != "$AIT_LAB_HOST_SHORTCUT_COMPONENT" \
+            || "${owner[1]:-}" != "$AIT_LAB_HOST_SHORTCUT_ACTION" ]]; then
+        friendly=${owner[2]:-${owner[0]}}
+        die "Meta+Ctrl+Shift+A already belongs to $friendly; the lab will not steal it"
+    fi
+    if ((${#owner[@]} > 0)) && ! host_shortcut_artifacts_owned; then
+        die 'the lab shortcut is already registered without matching ownership records'
+    fi
+}
+
+desktop_exec_quote() {
+    local value=$1
+
+    [[ "$value" != *$'\n'* && "$value" != *$'\r'* ]] || return 1
+    value=${value//\\/\\\\}
+    value=${value//\"/\\\"}
+    value=${value//\`/\\\`}
+    value=${value//\$/\\\$}
+    value=${value//%/%%}
+    printf '"%s"' "$value"
+}
+
+write_host_shortcut_files() {
+    local desktop_exec desktop_temporary launcher_temporary record_temporary
+
+    mkdir -p -- "$(dirname -- "$AIT_LAB_HOST_DESKTOP")" "$AIT_LAB_HOST_STATE"
+    launcher_temporary="$AIT_LAB_HOST_LAUNCHER.tmp.$$"
+    record_temporary="$AIT_LAB_HOST_RECORD.tmp.$$"
+    desktop_temporary="$AIT_LAB_HOST_DESKTOP.tmp.$$"
+
+    {
+        printf '#!/usr/bin/env bash\n\n'
+        printf 'set -euo pipefail\n\n'
+        printf '# AIT-Lab-Project: %s\n' "$AIT_LAB_PROJECT_ROOT"
+        printf 'exec env AIT_LAB_STATE_ROOT=%q AIT_LAB_SOCKET_ROOT=%q AIT_LAB_HOST_DATA_HOME=%q %q shortcut\n' \
+            "$AIT_LAB_STATE_ROOT" \
+            "$AIT_LAB_SOCKET_ROOT" \
+            "$AIT_LAB_HOST_DATA_HOME" \
+            "$AIT_LAB_PROJECT_ROOT/ait-lab"
+    } > "$launcher_temporary"
+    chmod 700 "$launcher_temporary"
+    mv -f -- "$launcher_temporary" "$AIT_LAB_HOST_LAUNCHER"
+
+    jq -n \
+        --arg projectRoot "$AIT_LAB_PROJECT_ROOT" \
+        --arg desktop "$AIT_LAB_HOST_DESKTOP" \
+        --arg launcher "$AIT_LAB_HOST_LAUNCHER" \
+        --arg component "$AIT_LAB_HOST_SHORTCUT_COMPONENT" \
+        --arg action "$AIT_LAB_HOST_SHORTCUT_ACTION" \
+        '{
+            projectRoot: $projectRoot,
+            desktop: $desktop,
+            launcher: $launcher,
+            component: $component,
+            action: $action
+        }' > "$record_temporary"
+    chmod 600 "$record_temporary"
+    mv -f -- "$record_temporary" "$AIT_LAB_HOST_RECORD"
+
+    desktop_exec=$(desktop_exec_quote "$AIT_LAB_HOST_LAUNCHER") \
+        || die 'could not encode the host shortcut launcher path'
+    {
+        printf '[Desktop Entry]\n'
+        printf 'Type=Application\n'
+        printf 'Name=Toggle agent instructions in the implementation lab\n'
+        printf 'Comment=Toggle the active isolated implementation\n'
+        printf 'Exec=%s\n' "$desktop_exec"
+        printf 'Icon=preferences-desktop-notification\n'
+        printf 'Terminal=false\n'
+        printf 'NoDisplay=true\n'
+        printf 'X-KDE-Shortcuts=Meta+Ctrl+Shift+A\n'
+        printf 'X-AIT-Lab-Project=%s\n' "$AIT_LAB_PROJECT_ROOT"
+    } > "$desktop_temporary"
+    chmod 600 "$desktop_temporary"
+    mv -f -- "$desktop_temporary" "$AIT_LAB_HOST_DESKTOP"
+}
+
+refresh_host_desktop_metadata() {
+    local kbuildsycoca refresh_status=0
+
+    kbuildsycoca=$(find_kbuildsycoca) || return 1
+    mkdir -p -- "$AIT_LAB_STATE_ROOT"
+    printf '[%s] %s --noincremental\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "$kbuildsycoca" \
+        >> "$AIT_LAB_HOST_REFRESH_LOG"
+    "$kbuildsycoca" --noincremental >> "$AIT_LAB_HOST_REFRESH_LOG" 2>&1 \
+        || refresh_status=$?
+    printf 'exit: %s\n' "$refresh_status" >> "$AIT_LAB_HOST_REFRESH_LOG"
+}
+
+register_host_shortcut() {
+    local qdbus owner_output="" friendly
+    local -a owner=()
+
+    preflight_host_shortcut
+    qdbus=$(find_qdbus) || return 1
+    write_host_shortcut_files
+    if ! refresh_host_desktop_metadata; then
+        printf 'ait-lab: could not refresh host Plasma desktop metadata\n' >&2
+        rm -f -- "$AIT_LAB_HOST_DESKTOP" "$AIT_LAB_HOST_LAUNCHER" "$AIT_LAB_HOST_RECORD"
+        refresh_host_desktop_metadata >/dev/null 2>&1 || true
+        return 1
+    fi
+
+    for _ in {1..100}; do
+        if ! owner_output=$(read_shortcut_owner "$qdbus"); then
+            printf 'ait-lab: could not verify the live Plasma shortcut registration\n' >&2
+            rm -f -- "$AIT_LAB_HOST_DESKTOP" "$AIT_LAB_HOST_LAUNCHER" "$AIT_LAB_HOST_RECORD"
+            refresh_host_desktop_metadata >/dev/null 2>&1 || true
+            return 1
+        fi
+        [[ -n "$owner_output" ]] && break
+        sleep 0.02
+    done
+    if [[ -n "$owner_output" ]]; then
+        mapfile -t owner <<< "$owner_output"
+    fi
+    if [[ "${owner[0]:-}" != "$AIT_LAB_HOST_SHORTCUT_COMPONENT" \
+        || "${owner[1]:-}" != "$AIT_LAB_HOST_SHORTCUT_ACTION" ]]; then
+        friendly=${owner[2]:-${owner[0]:-no action}}
+        printf 'ait-lab: Plasma did not register the lab shortcut; current owner: %s\n' "$friendly" >&2
+        rm -f -- "$AIT_LAB_HOST_DESKTOP" "$AIT_LAB_HOST_LAUNCHER" "$AIT_LAB_HOST_RECORD"
+        refresh_host_desktop_metadata >/dev/null 2>&1 || true
+        return 1
+    fi
+}
+
+unregister_host_shortcut() {
+    local qdbus owner_output unregister_output
+    local -a owner=()
+
+    [[ -e "$AIT_LAB_HOST_RECORD" || -L "$AIT_LAB_HOST_RECORD" ]] || return 0
+    if ! host_shortcut_artifacts_owned; then
+        printf 'ait-lab: will not remove host shortcut files not owned by this lab: %s\n' \
+            "$AIT_LAB_HOST_DESKTOP" >&2
+        return 1
+    fi
+    qdbus=$(find_qdbus) || {
+        printf 'ait-lab: Plasma shortcut cleanup requires qdbus6 or qdbus\n' >&2
+        return 1
+    }
+    owner_output=$(read_shortcut_owner "$qdbus") || {
+        printf 'ait-lab: could not query the live Plasma shortcut registry during cleanup\n' >&2
+        return 1
+    }
+    if [[ -n "$owner_output" ]]; then
+        mapfile -t owner <<< "$owner_output"
+    fi
+    if ((${#owner[@]} > 0)) \
+        && [[ "${owner[0]}" != "$AIT_LAB_HOST_SHORTCUT_COMPONENT" \
+            || "${owner[1]:-}" != "$AIT_LAB_HOST_SHORTCUT_ACTION" ]]; then
+        printf 'ait-lab: the host shortcut now belongs to %s; refusing cleanup\n' \
+            "${owner[2]:-${owner[0]}}" >&2
+        return 1
+    fi
+
+    rm -f -- "$AIT_LAB_HOST_DESKTOP"
+    if ((${#owner[@]} > 0)); then
+        unregister_output=$("$qdbus" \
+            org.kde.kglobalaccel \
+            /kglobalaccel \
+            org.kde.KGlobalAccel.unregister \
+            "$AIT_LAB_HOST_SHORTCUT_COMPONENT" \
+            "$AIT_LAB_HOST_SHORTCUT_ACTION") || {
+                printf 'ait-lab: could not unregister the live Plasma shortcut\n' >&2
+                return 1
+            }
+        [[ "$unregister_output" == true || "$unregister_output" == false ]] || {
+            printf 'ait-lab: Plasma returned an unexpected shortcut cleanup result\n' >&2
+            return 1
+        }
+    fi
+    if ! refresh_host_desktop_metadata; then
+        printf 'ait-lab: could not refresh host Plasma desktop metadata during cleanup\n' >&2
+        return 1
+    fi
+    rm -f -- "$AIT_LAB_HOST_LAUNCHER" "$AIT_LAB_HOST_RECORD"
+    rmdir --ignore-fail-on-non-empty "$AIT_LAB_HOST_STATE" >/dev/null 2>&1 || true
+}
+
+configure_host_shortcut() {
+    case "$1" in
+        true) register_host_shortcut ;;
+        false) unregister_host_shortcut ;;
+        *) die "invalid Plasma shortcut state: $1" ;;
+    esac
 }
 
 seed_session() {
@@ -282,6 +575,7 @@ write_manifest() {
     local session=$4
     local host_binary=$5
     local sandbox_binary=$6
+    local plasma_shortcut=$7
     local revision="fixture"
     local source_status=""
     local snapshot_digest
@@ -309,6 +603,7 @@ write_manifest() {
         --arg session "$session" \
         --arg hostBinary "$host_binary" \
         --arg sandboxBinary "$sandbox_binary" \
+        --argjson plasmaShortcut "$plasma_shortcut" \
         --arg createdAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         '{
             implementation: $implementation,
@@ -320,6 +615,7 @@ write_manifest() {
             session: $session,
             hostBinary: $hostBinary,
             sandboxBinary: $sandboxBinary,
+            plasmaShortcut: $plasmaShortcut,
             createdAt: $createdAt
         }' > "$session/manifest.json"
 }
@@ -369,11 +665,12 @@ runtime_sandbox() {
     printf '%s\0' --ro-bind "$host_binary" "$sandbox_binary"
 }
 
-run_active_app() {
-    local session sandbox_binary proxy_name proxy_socket
+run_session_app() {
+    local session=$1
+    local sandbox_binary proxy_name proxy_socket
     local -a sandbox
 
-    session=$(active_session) || die 'no active lab session; run ./ait-lab use first'
+    shift
     sandbox_binary=$(jq -r '.sandboxBinary' "$session/manifest.json")
     proxy_name=$(<"$session/runtime/dbus-socket-name")
     proxy_socket="$AIT_LAB_SOCKET_ROOT/$proxy_name"
@@ -382,6 +679,29 @@ run_active_app() {
     "${sandbox[@]}" \
         --setenv DBUS_SESSION_BUS_ADDRESS "unix:path=/lab/bus/$proxy_name" \
         "$sandbox_binary" "$@"
+}
+
+run_active_app() {
+    local session
+
+    session=$(active_session) || die 'no active lab session; run ./ait-lab use first'
+    run_session_app "$session" "$@"
+}
+
+run_active_shortcut() {
+    local session implementation
+
+    session=$(active_session) || die 'no active lab session; run ./ait-lab use first'
+    [[ "$(jq -r '.plasmaShortcut // false' "$session/manifest.json")" == true ]] \
+        || die 'the active lab session did not enable the Plasma shortcut'
+    host_shortcut_artifacts_owned \
+        || die 'the active lab session has no matching host shortcut registration'
+    implementation=$(jq -r '.implementation' "$session/manifest.json")
+    case "$implementation" in
+        codex-nc) run_session_app "$session" toggle ;;
+        claude|codex-fc) run_session_app "$session" toggle --notify ;;
+        *) die "unknown implementation in active manifest: $implementation" ;;
+    esac
 }
 
 run_statusline_fixture() {
@@ -585,8 +905,9 @@ stop_session() {
 
 use_implementation() {
     local implementation=$1
+    local plasma_shortcut=$2
     local source source_label session_id session build_target cargo_cache rust_toolchain
-    local host_binary sandbox_binary previous=""
+    local host_binary sandbox_binary previous="" previous_plasma_shortcut=false
     local -a binary_paths source_details
 
     require_command bwrap
@@ -596,6 +917,9 @@ use_implementation() {
     require_command tar
     umask 077
     prepare_socket_root
+    if [[ "$plasma_shortcut" == true ]]; then
+        preflight_host_shortcut
+    fi
     mapfile -t source_details < <(resolve_source "$implementation")
     ((${#source_details[@]} == 2)) || die "failed to resolve implementation source: $implementation"
     source=${source_details[0]}
@@ -623,28 +947,54 @@ use_implementation() {
     host_binary=${binary_paths[0]}
     sandbox_binary=${binary_paths[1]}
     [[ -x "$host_binary" ]] || die "installer did not create $sandbox_binary"
-    write_manifest "$implementation" "$source" "$source_label" "$session" "$host_binary" "$sandbox_binary"
+    write_manifest \
+        "$implementation" \
+        "$source" \
+        "$source_label" \
+        "$session" \
+        "$host_binary" \
+        "$sandbox_binary" \
+        "$plasma_shortcut"
 
     previous=$(active_session || true)
+    if [[ -n "$previous" ]]; then
+        previous_plasma_shortcut=$(jq -r '.plasmaShortcut // false' "$previous/manifest.json")
+    fi
+    if ! configure_host_shortcut "$plasma_shortcut"; then
+        return 1
+    fi
     if [[ -n "$previous" ]]; then
         stop_session "$previous"
     fi
     if ! start_session "$session"; then
+        local restore_plasma_shortcut=false
+
         if [[ -n "$previous" ]] && start_session "$previous"; then
             write_active_session "$previous"
+            restore_plasma_shortcut=$previous_plasma_shortcut
             printf 'ait-lab: restored the previous session after the new tray failed\n' >&2
+        else
+            rm -f -- "$AIT_LAB_ACTIVE_FILE"
+        fi
+        if ! configure_host_shortcut "$restore_plasma_shortcut"; then
+            printf 'ait-lab: failed to restore the previous Plasma shortcut state\n' >&2
         fi
         return 1
     fi
     write_active_session "$session"
 
     printf 'Using %s.\n' "$implementation"
+    if [[ "$plasma_shortcut" == true ]]; then
+        printf 'Plasma shortcut: registered\n'
+    else
+        printf 'Plasma shortcut: disabled\n'
+    fi
     printf 'Fake home: %s\n' "$session/home"
     printf 'Logs: %s\n' "$session/logs"
 }
 
 show_active_session() {
-    local session source_status source_state state="stopped"
+    local session source_status source_state state="stopped" shortcut_state="disabled"
 
     if ! session=$(active_session); then
         printf 'No active lab session.\n'
@@ -652,6 +1002,13 @@ show_active_session() {
     fi
     if supervisor_matches_session "$session"; then
         state="running"
+    fi
+    if [[ "$(jq -r '.plasmaShortcut // false' "$session/manifest.json")" == true ]]; then
+        if host_shortcut_artifacts_owned; then
+            shortcut_state="registered"
+        else
+            shortcut_state="missing"
+        fi
     fi
     source_status=$(jq -r '.sourceStatus // .worktreeStatus // ""' "$session/manifest.json")
     if [[ -n "$source_status" ]]; then
@@ -666,21 +1023,27 @@ show_active_session() {
     printf 'Source tree: %s\n' "$source_state"
     printf 'Snapshot: %.12s\n' "$(jq -r '.snapshotDigest' "$session/manifest.json")"
     printf 'Tray: %s\n' "$state"
+    printf 'Plasma shortcut: %s\n' "$shortcut_state"
     printf 'Session: %s\n' "$session"
     printf 'Fake home: %s\n' "$session/home"
     printf 'Logs: %s\n' "$session/logs"
 }
 
 stop_active_session() {
-    local session
+    local session cleanup_status=0
 
     if ! session=$(active_session); then
+        if host_shortcut_artifacts_exist; then
+            unregister_host_shortcut || cleanup_status=$?
+        fi
         printf 'No active lab session.\n'
-        return
+        return "$cleanup_status"
     fi
+    unregister_host_shortcut || cleanup_status=$?
     stop_session "$session"
     rm -f -- "$AIT_LAB_ACTIVE_FILE"
     printf 'Stopped %s.\n' "$(jq -r '.implementation' "$session/manifest.json")"
+    return "$cleanup_status"
 }
 
 if [[ "${1:-}" == __supervise ]]; then
@@ -700,13 +1063,23 @@ fi
 
 case "${1:-}" in
     use)
-        [[ $# -eq 2 ]] || { usage >&2; exit 2; }
-        use_implementation "$2"
+        if [[ $# -eq 2 ]]; then
+            use_implementation "$2" true
+        elif [[ $# -eq 3 && "$3" == --no-plasma-shortcut ]]; then
+            use_implementation "$2" false
+        else
+            usage >&2
+            exit 2
+        fi
         ;;
     app)
         [[ $# -ge 2 ]] || { usage >&2; exit 2; }
         shift
         run_active_app "$@"
+        ;;
+    shortcut)
+        [[ $# -eq 1 ]] || { usage >&2; exit 2; }
+        run_active_shortcut
         ;;
     statusline)
         [[ $# -eq 2 ]] || { usage >&2; exit 2; }
