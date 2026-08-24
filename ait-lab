@@ -31,15 +31,6 @@ require_command() {
     command -v -- "$1" >/dev/null 2>&1 || die "required command is missing: $1"
 }
 
-implementation_branch() {
-    case "$1" in
-        claude) printf 'spec-1-agent-instructions\n' ;;
-        codex-nc) printf 'issue-1-agent-instructions\n' ;;
-        codex-fc) printf 'codex/full-context-implementation\n' ;;
-        *) die "unknown implementation '$1'; expected claude, codex-nc, or codex-fc" ;;
-    esac
-}
-
 implementation_directory() {
     case "$1" in
         claude) printf 'implementations/claude\n' ;;
@@ -51,35 +42,26 @@ implementation_directory() {
 
 implementation_override() {
     case "$1" in
-        claude) printf '%s' "${AIT_LAB_WORKTREE_CLAUDE:-}" ;;
-        codex-nc) printf '%s' "${AIT_LAB_WORKTREE_CODEX_NC:-}" ;;
-        codex-fc) printf '%s' "${AIT_LAB_WORKTREE_CODEX_FC:-}" ;;
+        claude) printf '%s' "${AIT_LAB_SOURCE_CLAUDE:-}" ;;
+        codex-nc) printf '%s' "${AIT_LAB_SOURCE_CODEX_NC:-}" ;;
+        codex-fc) printf '%s' "${AIT_LAB_SOURCE_CODEX_FC:-}" ;;
     esac
 }
 
 resolve_source() {
     local implementation=$1
-    local branch directory label override source
+    local directory label override source
 
-    branch=$(implementation_branch "$implementation")
     directory=$(implementation_directory "$implementation")
     override=$(implementation_override "$implementation")
     if [[ -n "$override" ]]; then
         source=$override
         label=$override
-    elif [[ -d "$AIT_LAB_PROJECT_ROOT/$directory" ]]; then
+    else
         source="$AIT_LAB_PROJECT_ROOT/$directory"
         label=$directory
-    else
-        source=$(git -C "$AIT_LAB_PROJECT_ROOT" worktree list --porcelain | awk \
-            -v expected="refs/heads/$branch" '
-                /^worktree / { path = substr($0, 10) }
-                /^branch / && substr($0, 8) == expected { print path; exit }
-            ')
-        label="branch:$branch"
     fi
 
-    [[ -n "$source" ]] || die "implementation source is unavailable: $implementation"
     [[ -d "$source" ]] || die "implementation source does not exist: $source"
     source=$(realpath -e -- "$source")
     [[ -f "$source/Cargo.toml" ]] || die "implementation source has no Cargo.toml: $source"

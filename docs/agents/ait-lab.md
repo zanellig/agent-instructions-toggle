@@ -20,7 +20,7 @@ The identifiers select these in-repository projects:
 | `codex-nc` | `implementations/codex-nc` |
 | `codex-fc` | `implementations/codex-fc` |
 
-`use` snapshots the selected directory, builds and installs that snapshot, and starts its tray. Tracked modifications and untracked non-ignored files inside the project participate in the snapshot. While the implementation-import PRs are being merged, a missing directory falls back to its original worktree branch. Build and installation must finish before the active tray stops. If the new tray cannot start, the previous session starts again.
+`use` snapshots the selected directory, builds and installs that snapshot, and starts its tray. Tracked modifications and untracked non-ignored files inside the project participate in the snapshot. Build and installation must finish before the active tray stops. If the new tray cannot start, the previous session starts again.
 
 Each selection starts with fresh instruction documents and Claude settings. Switching back creates another fresh session rather than reusing changed state.
 
@@ -63,11 +63,11 @@ The Claude process has network access and an empty project directory. It cannot 
 
 ## Isolation
 
-Candidate build scripts and binaries see `/usr`, `/etc`, a read-only Rust toolchain, and lab-owned writable directories. The real home and every worktree remain absent from the sandbox. A filtered D-Bus proxy permits notifications and StatusNotifier traffic. Runtime networking is disabled except for `./ait-lab claude`.
+Candidate build scripts and binaries see `/usr`, `/etc`, a read-only Rust toolchain, and lab-owned writable directories. The real home and repository checkout remain absent from the sandbox. A filtered D-Bus proxy permits notifications and StatusNotifier traffic. Runtime networking is disabled except for `./ait-lab claude`.
 
 Installers write desktop entries into the synthetic XDG directories. Desktop-cache refresh commands are stubs, so the lab does not register the candidate shortcut or autostart entry with the live desktop. Test those persistent integrations in a disposable Plasma user or virtual machine.
 
-Generated homes, build outputs, Cargo downloads, sockets, credentials, and logs stay under `.ait-lab-state/`, which Git ignores. `git clean -fdx` can still remove the locked Claude worktree under `.claude/worktrees`, so do not run it in the main checkout.
+Generated homes, build outputs, Cargo downloads, sockets, credentials, and logs stay under `.ait-lab-state/`, which Git ignores.
 
 ## Verify the lab
 

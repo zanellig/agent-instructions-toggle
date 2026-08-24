@@ -73,9 +73,9 @@ assert_session_stopped() {
 
 run_lab() {
     AIT_LAB_STATE_ROOT="$TEST_STATE" \
-    AIT_LAB_WORKTREE_CLAUDE="$FAKE_CANDIDATE" \
-    AIT_LAB_WORKTREE_CODEX_NC="$FAKE_CANDIDATE" \
-    AIT_LAB_WORKTREE_CODEX_FC="$FAKE_CANDIDATE" \
+    AIT_LAB_SOURCE_CLAUDE="$FAKE_CANDIDATE" \
+    AIT_LAB_SOURCE_CODEX_NC="$FAKE_CANDIDATE" \
+    AIT_LAB_SOURCE_CODEX_FC="$FAKE_CANDIDATE" \
     AIT_LAB_CLAUDE_EXECUTABLE="$FAKE_CLAUDE" \
     AIT_LAB_SESSION_BUS_ADDRESS="$LAB_BUS_ADDRESS" \
         "$LAB" "$@"
@@ -150,8 +150,8 @@ test_use_starts_an_isolated_candidate() {
     output=$(run_lab app probe-read "$TEST_ROOT/AGENTS.md" 2>&1)
     probe_status=$?
     set -e
-    assert_equal "23" "$probe_status" "the candidate should not read files from the source worktree"
-    assert_contains "blocked:" "$output" "the candidate should observe that the worktree is absent"
+    assert_equal "23" "$probe_status" "the candidate should not read files from the repository checkout"
+    assert_contains "blocked:" "$output" "the candidate should observe that the checkout is absent"
 
     set +e
     output=$(run_lab app probe-write /lab/session/manifest.json 2>&1)
