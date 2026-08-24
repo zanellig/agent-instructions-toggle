@@ -155,12 +155,16 @@ validate_status_metadata() {
         (.hadSettingsFile | type == "boolean") and
         (.hadStatusLine | type == "boolean") and
         has("previousStatusLine") and
-        (if .hadStatusLine then
-            (.previousStatusLine | type == "object") and
-            .previousStatusLine.type == "command" and
-            (.previousStatusLine.command | type == "string")
+        (if .hadSettingsFile then
+            if .hadStatusLine then
+                (.previousStatusLine | type == "object") and
+                .previousStatusLine.type == "command" and
+                (.previousStatusLine.command | type == "string")
+            else
+                .previousStatusLine == null
+            end
          else
-            .previousStatusLine == null
+            (.hadStatusLine == false) and (.previousStatusLine == null)
          end)
     ' "$metadata" >/dev/null; then
         printf 'error: invalid Claude status integration metadata in %s\n' "$profile" >&2

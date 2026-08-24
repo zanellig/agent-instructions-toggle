@@ -259,6 +259,51 @@ fn notified_operational_failure_reports_that_no_transition_completed() {
     );
 }
 
+#[test]
+fn notified_operational_failures_sanitize_environment_paths_for_markup_renderers() {
+    for environment_variable in ["HOME", "XDG_STATE_HOME"] {
+        let desktop = TestDesktop::new(0);
+        let blocked_runtime = desktop.root.join("runtime-file");
+        fs::write(&blocked_runtime, "not a directory\n").unwrap();
+        let hostile_path = desktop
+            .root
+            .join(format!("{environment_variable}-<b>&\"'\u{1b}\n"));
+        fs::write(&hostile_path, "not a directory\n").unwrap();
+        let mut command = desktop.command_builder(&["toggle", "--notify"]);
+        command.env("XDG_RUNTIME_DIR", &blocked_runtime);
+        if environment_variable == "HOME" {
+            command.env("HOME", &hostile_path);
+            command.env_remove("XDG_STATE_HOME");
+        } else {
+            command.env("XDG_STATE_HOME", &hostile_path);
+        }
+
+        let output = command.output().unwrap();
+
+        assert!(!output.status.success());
+        assert!(
+            stderr(&output).contains(&*hostile_path.to_string_lossy()),
+            "{}",
+            stderr(&output)
+        );
+        let notification = fs::read_to_string(&desktop.notifications).unwrap();
+        let arguments: Vec<_> = notification.split_terminator('\n').collect();
+        assert_eq!(arguments.len(), 4, "{notification:?}");
+        assert!(
+            notification.contains(&format!("{environment_variable}-?b")),
+            "{notification:?}"
+        );
+        for argument in arguments {
+            assert!(
+                !argument.chars().any(|character| {
+                    character.is_control() || matches!(character, '<' | '>' | '&' | '\'' | '"')
+                }),
+                "unsafe notification argument: {argument:?}"
+            );
+        }
+    }
+}
+
 fn stderr(output: &Output) -> String {
     String::from_utf8(output.stderr.clone()).unwrap()
 }

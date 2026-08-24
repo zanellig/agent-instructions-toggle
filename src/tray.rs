@@ -53,7 +53,10 @@ impl ksni::Tray for TrayIndicator {
         if self.inspection.missing_targets.is_empty() {
             Vec::new()
         } else {
-            vec![colored_circle(10, [255, 245, 166, 35])]
+            vec![colored_circle(
+                10,
+                InstructionState::Mixed.appearance().argb(),
+            )]
         }
     }
 
@@ -281,7 +284,12 @@ mod tests {
         let tooltip = tray.tool_tip();
         assert_eq!(tooltip.title, "AGENTS: on");
         assert_eq!(tooltip.description, "Missing: .codex-empty/AGENTS.md");
-        assert_eq!(tray.overlay_icon_pixmap().len(), 1);
+        let overlay = tray.overlay_icon_pixmap().remove(0);
+        let center = ((overlay.height / 2 * overlay.width + overlay.width / 2) * 4) as usize;
+        assert_eq!(
+            &overlay.data[center..center + 4],
+            &InstructionState::Mixed.appearance().argb()
+        );
 
         let labels: Vec<_> = tray
             .menu()

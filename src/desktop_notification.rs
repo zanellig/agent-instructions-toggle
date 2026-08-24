@@ -62,15 +62,29 @@ fn append_missing_targets(body: &mut String, inspection: &Inspection) {
 }
 
 fn send(title: &str, body: &str) {
+    let title = sanitize_text(title);
+    let body = sanitize_text(body);
     let _ = Command::new("notify-send")
         .args([
             "--app-name=Agent Instructions",
             "--icon=preferences-system",
-            title,
-            body,
+            title.as_str(),
+            body.as_str(),
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+}
+
+fn sanitize_text(text: &str) -> String {
+    text.chars()
+        .map(|character| {
+            if character.is_control() || matches!(character, '<' | '>' | '&' | '\'' | '"') {
+                '?'
+            } else {
+                character
+            }
+        })
+        .collect()
 }

@@ -469,29 +469,42 @@ fn uninstaller_preserves_a_status_command_changed_after_installation() {
 
 #[test]
 fn uninstaller_refuses_metadata_that_does_not_match_the_install_schema() {
-    let install = TestInstall::new();
-    let profile = install.claude_profile(".claude");
-    fs::create_dir_all(&profile).unwrap();
-    let installed = install.command(&[]);
-    assert!(installed.status.success(), "{}", stderr(&installed));
-    let metadata = install.status_metadata(".claude");
-    let wrapper = install.status_wrapper(".claude");
-    let settings = profile.join("settings.json");
-    let settings_before = fs::read_to_string(&settings).unwrap();
-    fs::write(
-        &metadata,
+    for invalid_metadata in [
+        r#"{"version":1,"hadSettingsFile":false,"hadStatusLine":true,"previousStatusLine":{"type":"command","command":"/prior/status"}}"#,
         r#"{"version":1,"hadSettingsFile":false,"hadStatusLine":true,"previousStatusLine":null}"#,
-    )
-    .unwrap();
+        r#"{"version":1,"hadSettingsFile":false,"hadStatusLine":false,"previousStatusLine":{"type":"command","command":"/prior/status"}}"#,
+        r#"{"version":1,"hadSettingsFile":true,"hadStatusLine":false,"previousStatusLine":{"type":"command","command":"/prior/status"}}"#,
+    ] {
+        let install = TestInstall::new();
+        let profile = install.claude_profile(".claude");
+        fs::create_dir_all(&profile).unwrap();
+        let installed = install.command(&[]);
+        assert!(installed.status.success(), "{}", stderr(&installed));
+        let metadata = install.status_metadata(".claude");
+        let wrapper = install.status_wrapper(".claude");
+        let settings = profile.join("settings.json");
+        let settings_before = fs::read_to_string(&settings).unwrap();
+        fs::write(&metadata, invalid_metadata).unwrap();
 
-    let removed = install.command(&["--uninstall"]);
+        let removed = install.command(&["--uninstall"]);
 
-    assert!(!removed.status.success());
-    assert!(stderr(&removed).contains("invalid Claude status integration metadata"));
-    assert_eq!(fs::read_to_string(&settings).unwrap(), settings_before);
-    assert!(wrapper.exists());
-    assert!(metadata.exists());
-    assert!(install.bin_home.join("agent-instructions").exists());
+        assert!(!removed.status.success(), "{invalid_metadata}");
+        assert!(
+            stderr(&removed).contains("invalid Claude status integration metadata"),
+            "{invalid_metadata}"
+        );
+        assert_eq!(
+            fs::read_to_string(&settings).unwrap(),
+            settings_before,
+            "{invalid_metadata}"
+        );
+        assert!(wrapper.exists(), "{invalid_metadata}");
+        assert!(metadata.exists(), "{invalid_metadata}");
+        assert!(
+            install.bin_home.join("agent-instructions").exists(),
+            "{invalid_metadata}"
+        );
+    }
 }
 
 fn stderr(output: &Output) -> String {
