@@ -18,6 +18,7 @@ readonly AIT_LAB_HOST_DESKTOP="$AIT_LAB_HOST_DATA_HOME/applications/$AIT_LAB_HOS
 readonly AIT_LAB_HOST_STATE="$AIT_LAB_STATE_ROOT/host-shortcut"
 readonly AIT_LAB_HOST_LAUNCHER="$AIT_LAB_HOST_STATE/shortcut"
 readonly AIT_LAB_HOST_RECORD="$AIT_LAB_HOST_STATE/registration.json"
+readonly AIT_LAB_HOST_REFRESH_LOG="$AIT_LAB_STATE_ROOT/host-shortcut-refresh.log"
 AIT_LAB_SUPERVISED_SESSION=""
 AIT_LAB_SUPERVISED_PROXY_SOCKET=""
 AIT_LAB_SUPERVISED_PROXY_PID=""
@@ -309,10 +310,17 @@ write_host_shortcut_files() {
 }
 
 refresh_host_desktop_metadata() {
-    local kbuildsycoca
+    local kbuildsycoca refresh_status=0
 
     kbuildsycoca=$(find_kbuildsycoca) || return 1
-    "$kbuildsycoca" --noincremental || true
+    mkdir -p -- "$AIT_LAB_STATE_ROOT"
+    printf '[%s] %s --noincremental\n' \
+        "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        "$kbuildsycoca" \
+        >> "$AIT_LAB_HOST_REFRESH_LOG"
+    "$kbuildsycoca" --noincremental >> "$AIT_LAB_HOST_REFRESH_LOG" 2>&1 \
+        || refresh_status=$?
+    printf 'exit: %s\n' "$refresh_status" >> "$AIT_LAB_HOST_REFRESH_LOG"
 }
 
 register_host_shortcut() {

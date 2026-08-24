@@ -10,6 +10,7 @@ readonly TEST_RUNTIME="$TEST_TEMP/runtime"
 readonly TEST_HOST_DATA="$TEST_TEMP/host-data"
 readonly TEST_HOST_DESKTOP="$TEST_HOST_DATA/applications/ait-lab-agent-instructions-toggle.desktop"
 readonly TEST_HOST_REFRESH_LOG="$TEST_TEMP/host-refresh.log"
+readonly TEST_HOST_REFRESH_CAPTURE="$TEST_STATE/host-shortcut-refresh.log"
 readonly TEST_KGLOBALACCEL_LOG="$TEST_TEMP/kglobalaccel.log"
 readonly TEST_KGLOBALACCEL_OWNER="$TEST_TEMP/kglobalaccel-owner"
 readonly FAKE_CANDIDATE="$TEST_ROOT/tests/ait-lab/fake-candidate"
@@ -53,6 +54,18 @@ assert_contains() {
     if [[ "$actual" != *"$expected"* ]]; then
         printf 'missing: %q\n' "$expected" >&2
         printf 'actual:  %q\n' "$actual" >&2
+        fail "$message"
+    fi
+}
+
+assert_not_contains() {
+    local unexpected=$1
+    local actual=$2
+    local message=$3
+
+    if [[ "$actual" == *"$unexpected"* ]]; then
+        printf 'unexpected: %q\n' "$unexpected" >&2
+        printf 'actual:     %q\n' "$actual" >&2
         fail "$message"
     fi
 }
@@ -264,8 +277,11 @@ test_default_plasma_shortcut_registration() {
     assert_contains "already belongs to Existing" "$output" "use should name the conflicting shortcut owner"
     rm -f -- "$TEST_KGLOBALACCEL_OWNER"
 
-    output=$(run_lab use claude)
+    output=$(run_lab use claude 2>&1)
     assert_contains "Plasma shortcut: registered" "$output" "use should report host shortcut registration"
+    assert_not_contains "kf.service.sycoca: ERROR" "$output" "use should not leak tolerated host cache errors"
+    output=$(<"$TEST_HOST_REFRESH_CAPTURE")
+    assert_contains "kf.service.sycoca: ERROR" "$output" "use should preserve host cache diagnostics in the lab log"
     [[ -f "$TEST_HOST_DESKTOP" ]] || fail "use did not create the host desktop entry"
     output=$(<"$TEST_HOST_DESKTOP")
     assert_contains "X-KDE-Shortcuts=Meta+Ctrl+Shift+A" "$output" "host desktop entry should register the candidate shortcut"

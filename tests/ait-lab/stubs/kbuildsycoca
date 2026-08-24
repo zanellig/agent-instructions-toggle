@@ -16,4 +16,6 @@ if [[ -n "${AIT_LAB_FAKE_KGLOBALACCEL_OWNER_FILE:-}" \
     else
         rm -f -- "$AIT_LAB_FAKE_KGLOBALACCEL_OWNER_FILE"
     fi
+    printf 'kf.service.sycoca: ERROR fake cache write failure\n' >&2
+    exit 255
 fi

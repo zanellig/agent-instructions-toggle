@@ -40,6 +40,8 @@ The default mode creates one lab-owned host desktop action. That action runs `./
 
 The lab refuses to overwrite a desktop entry that it does not own and refuses to steal `Meta+Ctrl+Shift+A` from another Plasma action. A normal switch retargets the host action to the new session. Switching with `--no-plasma-shortcut` or running `./ait-lab stop` unregisters the action and removes the generated host files. `./ait-lab show` reports `registered`, `disabled`, or `missing` for the active session.
 
+Plasma desktop-cache refreshes can return a nonzero status even when KGlobalAccel registers or removes the action successfully. The lab verifies the KGlobalAccel owner instead of treating the cache command as authoritative. It records cache command output in `.ait-lab-state/host-shortcut-refresh.log` rather than mixing those diagnostics into normal `use` and `stop` output.
+
 The default mode tests a real keypress through the lab bridge, but it does not prove that a candidate installer registers persistent desktop metadata correctly. Use a disposable Plasma user or virtual machine for that installer test.
 
 ## Exercise the active implementation
