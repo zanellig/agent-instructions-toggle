@@ -97,9 +97,26 @@ test_show_reports_no_active_session() {
 }
 
 test_use_starts_an_isolated_candidate() {
-    local output claude_session final_session
+    local output claude_session final_session local_lab local_project local_state
 
     start_test_bus
+    local_project="$TEST_TEMP/local-project"
+    local_lab="$local_project/ait-lab"
+    local_state="$TEST_TEMP/local-state"
+    mkdir -p "$local_project/implementations" "$local_project/tests"
+    cp "$LAB" "$local_lab"
+    ln -s "$FAKE_CANDIDATE" "$local_project/implementations/claude"
+    ln -s "$TEST_ROOT/tests/ait-lab" "$local_project/tests/ait-lab"
+
+    output=$(AIT_LAB_STATE_ROOT="$local_state" \
+        AIT_LAB_CLAUDE_EXECUTABLE="$FAKE_CLAUDE" \
+        AIT_LAB_SESSION_BUS_ADDRESS="$LAB_BUS_ADDRESS" \
+        "$local_lab" use claude)
+    assert_contains "from implementations/claude" "$output" "use should select an in-repo implementation"
+    output=$(AIT_LAB_STATE_ROOT="$local_state" "$local_lab" show)
+    assert_contains "Source: implementations/claude" "$output" "show should report the in-repo source"
+    AIT_LAB_STATE_ROOT="$local_state" "$local_lab" stop >/dev/null
+
     output=$(run_lab use claude)
     assert_contains "Using claude" "$output" "use should report the selected implementation"
 

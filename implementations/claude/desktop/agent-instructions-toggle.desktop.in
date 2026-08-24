@@ -1,0 +1,13 @@
+[Desktop Entry]
+Type=Application
+Name=Toggle agent instructions
+GenericName=Agent instruction toggle
+Comment=Enable or disable global agent instruction documents for new agent contexts
+Exec=@BIN@ toggle --notify
+Icon=preferences-desktop-notification
+Terminal=false
+StartupNotify=false
+Categories=Utility;
+Keywords=agents;claude;codex;instructions;
+X-KDE-Shortcuts=Meta+Ctrl+Shift+A
+X-GNOME-Autostart-enabled=false

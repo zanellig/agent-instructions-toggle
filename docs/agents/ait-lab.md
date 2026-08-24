@@ -12,15 +12,15 @@ The lab requires Linux with a running user-systemd session, Bubblewrap, `xdg-dbu
 ./ait-lab use codex-fc
 ```
 
-The identifiers select these worktree branches:
+The identifiers select these in-repository projects:
 
-| Identifier | Branch |
+| Identifier | Directory |
 | --- | --- |
-| `claude` | `spec-1-agent-instructions` |
-| `codex-nc` | `issue-1-agent-instructions` |
-| `codex-fc` | `codex/full-context-implementation` |
+| `claude` | `implementations/claude` |
+| `codex-nc` | `implementations/codex-nc` |
+| `codex-fc` | `implementations/codex-fc` |
 
-`use` discovers the branch through `git worktree list`, snapshots its current files, builds and installs that snapshot, and starts its tray. Tracked modifications and untracked non-ignored files participate in the snapshot. Build and installation must finish before the active tray stops. If the new tray cannot start, the previous session starts again.
+`use` snapshots the selected directory, builds and installs that snapshot, and starts its tray. Tracked modifications and untracked non-ignored files inside the project participate in the snapshot. While the implementation-import PRs are being merged, a missing directory falls back to its original worktree branch. Build and installation must finish before the active tray stops. If the new tray cannot start, the previous session starts again.
 
 Each selection starts with fresh instruction documents and Claude settings. Switching back creates another fresh session rather than reusing changed state.
 
@@ -59,7 +59,7 @@ The Claude process has network access and an empty project directory. It cannot 
 ./ait-lab stop
 ```
 
-`show` reports the selected branch, revision, snapshot digest, tray state, fake home, and logs. `stop` removes the tray and D-Bus proxy by stopping their transient user-systemd unit. Session files remain available for comparison.
+`show` reports the selected source, revision, snapshot digest, tray state, fake home, and logs. `stop` removes the tray and D-Bus proxy by stopping their transient user-systemd unit. Session files remain available for comparison.
 
 ## Isolation
 
