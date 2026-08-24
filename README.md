@@ -11,7 +11,7 @@ The utility discovers immediate child directories of `$HOME` whose names use the
 - `.codex`, `.codex_*`, `.codex-*`, and `.codex.*` contain `AGENTS.md`.
 - `.claude`, `.claude_*`, `.claude-*`, and `.claude.*` contain `CLAUDE.md`.
 
-Names that look archived are excluded. The ignored markers are `bak`, `backup`, `archive`, `old`, and `copy`, including common variants such as `.codex_personal.bak`, `.codex_backup2`, and an editor `~` suffix. Discovery happens on every operation, so adding an active profile does not require a configuration change.
+Names that look archived are excluded. The ignored markers are `bak`, `backup`, `archive`, `old`, `orig`, `copy`, `save`, and `disabled`, including common variants such as `.codex_personal.bak`, `.codex_backup2`, and an editor `~` suffix. Discovery happens on every operation, so adding an active profile does not require a configuration change.
 
 An existing profile directory with neither the recognized nor disabled filename is reported as missing. A directory that does not exist is not treated as a target.
 
@@ -77,3 +77,10 @@ desktop-file-validate ~/.config/autostart/agent-instructions-tray.desktop
 ```
 
 On Plasma, inspect the registered shortcut in System Settings under Shortcuts, then confirm the tray tooltip, its four menu actions, and state updates after a CLI transition.
+
+After an integrated installation on Plasma, the opt-in live checks exercise both desktop contracts:
+
+```sh
+cargo test --test tray_live -- --ignored
+cargo test --test kde_live -- --ignored
+```

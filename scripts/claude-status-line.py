@@ -13,10 +13,8 @@ def main() -> int:
         base_command = config["base_command"]
         if not isinstance(binary, str) or not binary:
             raise TypeError("binary path must be a string")
-        if not isinstance(base_command, list) or not all(
-            isinstance(argument, str) and argument for argument in base_command
-        ):
-            raise TypeError("base command must be a list of strings")
+        if not isinstance(base_command, str):
+            raise TypeError("base command must be a string")
     except (OSError, ValueError, KeyError, TypeError) as error:
         print(f"agent-instructions status line: invalid installation: {error}", file=sys.stderr)
         return 1
@@ -25,8 +23,9 @@ def main() -> int:
     base_output = b""
     if base_command:
         try:
+            # This is the command Claude was already configured to execute through a shell.
             base = subprocess.run(
-                base_command,
+                ["/bin/sh", "-c", base_command],
                 input=payload,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,

@@ -17,8 +17,10 @@ def atomic_write(path: Path, contents: str, mode: int) -> None:
 
 
 def desktop_argument(value: str) -> str:
+    if any(ord(character) < 0x20 or ord(character) == 0x7F for character in value):
+        raise ValueError("the installation path contains unsupported control characters")
     escaped = value.replace("\\", "\\\\").replace('"', '\\"').replace("`", "\\`")
-    escaped = escaped.replace("$", "\\$")
+    escaped = escaped.replace("$", "\\$").replace("%", "%%")
     return f'"{escaped}"'
 
 
@@ -26,13 +28,6 @@ def render_desktop(template: Path, destination: Path, binary: Path) -> None:
     contents = template.read_text(encoding="utf-8")
     rendered = contents.replace("@BINARY@", desktop_argument(str(binary)))
     atomic_write(destination, rendered, 0o644)
-
-
-def safe_command(command: str) -> list[str]:
-    if any(character in command for character in "|&;<>\n"):
-        raise ValueError("the existing status-line command uses shell operators")
-    arguments = shlex.split(command)
-    return [os.path.expandvars(os.path.expanduser(argument)) for argument in arguments]
 
 
 def merge_claude_status(home: Path, data_home: Path, binary: Path, wrapper: Path) -> None:
@@ -55,14 +50,12 @@ def merge_claude_status(home: Path, data_home: Path, binary: Path, wrapper: Path
 
     if existing_command == wrapper_command and config_path.exists():
         installed_config = json.loads(config_path.read_text(encoding="utf-8"))
-        base_command = installed_config.get("base_command", [])
+        base_command = installed_config.get("base_command", "")
     elif isinstance(existing_command, str) and existing_command.strip():
-        base_command = safe_command(existing_command)
+        base_command = existing_command
     else:
-        base_command = []
-    if not isinstance(base_command, list) or not all(
-        isinstance(argument, str) and argument for argument in base_command
-    ):
+        base_command = ""
+    if not isinstance(base_command, str):
         raise ValueError("the saved status-line command is invalid")
 
     atomic_write(

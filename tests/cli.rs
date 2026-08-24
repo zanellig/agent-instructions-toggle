@@ -443,6 +443,9 @@ fn profiles_are_discovered_while_backup_directories_are_ignored() {
     let discovered = home.root.join(".codex_work/AGENTS.md");
     fs::create_dir_all(discovered.parent().unwrap()).expect("create discovered profile");
     fs::write(&discovered, "work profile\n").expect("write discovered profile");
+    let compact_profile = home.root.join(".codex2/AGENTS.md");
+    fs::create_dir_all(compact_profile.parent().unwrap()).expect("create compact profile name");
+    fs::write(&compact_profile, "compact profile\n").expect("write compact profile");
     let discovered_claude = home.root.join(".claude_work/CLAUDE.md");
     fs::create_dir_all(discovered_claude.parent().unwrap())
         .expect("create discovered Claude profile");
@@ -452,7 +455,10 @@ fn profiles_are_discovered_while_backup_directories_are_ignored() {
         ".codex_backup2/AGENTS.md",
         ".codex-personal.bak/AGENTS.md",
         ".codex.old/AGENTS.md",
+        ".codex_orig/AGENTS.md",
         ".codex_copy/AGENTS.md",
+        ".codex_save/AGENTS.md",
+        ".codex_disabled/AGENTS.md",
         ".codex_p2~/AGENTS.md",
         ".claude_archive/CLAUDE.md",
     ];
@@ -467,6 +473,8 @@ fn profiles_are_discovered_while_backup_directories_are_ignored() {
     assert!(output.status.success(), "stderr: {}", text(&output.stderr));
     assert!(!discovered.exists());
     assert!(disabled(&discovered).exists());
+    assert!(!compact_profile.exists());
+    assert!(disabled(&compact_profile).exists());
     assert!(!discovered_claude.exists());
     assert!(disabled(&discovered_claude).exists());
     for backup in backups {
@@ -474,4 +482,20 @@ fn profiles_are_discovered_while_backup_directories_are_ignored() {
         assert!(path.exists(), "backup was renamed: {}", path.display());
         assert!(!disabled(&path).exists());
     }
+}
+
+#[test]
+fn profile_labels_escape_terminal_controls_and_tooltip_markup() {
+    let home = TestHome::new();
+    home.enable_all();
+    let hostile_name = ".codex_\u{1b}[31m\n<b&>";
+    fs::create_dir(home.root.join(hostile_name)).expect("create hostile profile name");
+
+    let output = home.command("status");
+
+    assert!(output.status.success());
+    let stderr = text(&output.stderr);
+    assert!(!stderr.contains('\u{1b}'));
+    assert!(!stderr.contains("\n<b&>"));
+    assert!(stderr.contains("\\u{1b}[31m\\n\\u{3c}b\\u{26}\\u{3e}"));
 }

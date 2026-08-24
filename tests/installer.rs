@@ -16,7 +16,7 @@ impl Installation {
     fn new() -> Self {
         let id = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
         let home = std::env::temp_dir().join(format!(
-            "agent-instructions-installer-test-{}-{id}",
+            "agent-instructions-installer-%U-test-{}-{id}",
             std::process::id()
         ));
         fs::create_dir_all(home.join(".codex")).expect("create Codex home");
@@ -70,7 +70,7 @@ fn installer_copies_the_binary_and_extends_the_existing_status_line() {
     fs::write(
         installation.home.join(".claude/settings.json"),
         format!(
-            "{{\n  \"theme\": \"dark\",\n  \"statusLine\": {{\"type\": \"command\", \"command\": \"bash {}\"}}\n}}\n",
+            "{{\n  \"theme\": \"dark\",\n  \"statusLine\": {{\"type\": \"command\", \"command\": \"bash {} | sed 's/repo/repo/'\"}}\n}}\n",
             base_status.display()
         ),
     )
@@ -96,6 +96,7 @@ fn installer_copies_the_binary_and_extends_the_existing_status_line() {
             .unwrap()
             .contains("X-KDE-Shortcuts=Meta+Ctrl+Shift+A")
     );
+    assert!(fs::read_to_string(&application).unwrap().contains("%%U"));
     assert!(
         fs::read_to_string(&autostart)
             .unwrap()

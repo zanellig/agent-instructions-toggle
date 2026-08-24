@@ -216,7 +216,7 @@ fn inspect_home(home: &Path) -> io::Result<Inspection> {
         };
         let relative = active.strip_prefix(home).unwrap_or(&active);
         targets.push(ManagedTarget {
-            label: format!("~/{}", relative.display()),
+            label: safe_target_label(relative),
             active,
             disabled,
             status,
@@ -266,9 +266,6 @@ fn is_active_profile_name(directory_name: &str, base: &str) -> bool {
     let Some(suffix) = directory_name.strip_prefix(base) else {
         return false;
     };
-    if !suffix.is_empty() && !matches!(suffix.as_bytes()[0], b'_' | b'-' | b'.') {
-        return false;
-    }
     !looks_archived(suffix)
 }
 
@@ -282,11 +279,29 @@ fn looks_archived(suffix: &str) -> bool {
         .filter(|part| !part.is_empty())
         .any(|part| {
             [
-                "backup", "backups", "bak", "archive", "archived", "old", "copy",
+                "backup", "backups", "bak", "archive", "archived", "old", "orig", "copy", "save",
+                "disabled",
             ]
             .iter()
             .any(|marker| part == *marker || part.starts_with(marker))
         })
+}
+
+fn safe_target_label(relative: &Path) -> String {
+    let mut label = String::from("~/");
+    for character in relative.to_string_lossy().chars() {
+        if character.is_control() {
+            label.extend(character.escape_default());
+        } else {
+            match character {
+                '<' => label.push_str("\\u{3c}"),
+                '>' => label.push_str("\\u{3e}"),
+                '&' => label.push_str("\\u{26}"),
+                _ => label.push(character),
+            }
+        }
+    }
+    label
 }
 
 fn rename_targets(inspection: &Inspection, desired: InstructionState) -> Result<(), ApplyError> {
