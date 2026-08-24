@@ -1,0 +1,14 @@
+[package]
+name = "agent-instructions"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.89"
+description = "Control whether global coding-agent instruction documents load into new contexts"
+
+[dependencies]
+ksni = { version = "0.3.6", features = ["blocking"] }
+notify = "8.2.0"
+
+[profile.release]
+strip = true
+lto = "thin"

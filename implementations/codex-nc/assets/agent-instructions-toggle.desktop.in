@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Toggle Agent Instructions
+Comment=Change global instruction documents for new coding-agent contexts
+Exec=@BINARY@ toggle
+Icon=preferences-system
+Terminal=false
+NoDisplay=true
+X-KDE-Shortcuts=Meta+Ctrl+Shift+A
+

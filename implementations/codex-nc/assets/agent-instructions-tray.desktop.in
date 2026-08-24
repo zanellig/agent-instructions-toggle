@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Agent Instructions Indicator
+Comment=Show the global instruction state for new coding-agent contexts
+Exec=@BINARY@ tray
+Icon=preferences-system
+Terminal=false
+OnlyShowIn=KDE;
+X-KDE-autostart-after=panel
+
