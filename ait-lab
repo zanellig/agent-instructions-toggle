@@ -4,7 +4,8 @@ set -euo pipefail
 
 readonly AIT_LAB_PROJECT_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 readonly AIT_LAB_STATE_ROOT=${AIT_LAB_STATE_ROOT:-"$AIT_LAB_PROJECT_ROOT/.ait-lab-state"}
-readonly AIT_LAB_SOCKET_ROOT=${AIT_LAB_SOCKET_ROOT:-"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ait-lab"}
+readonly AIT_LAB_RUNTIME_ROOT=${XDG_RUNTIME_DIR:-"/run/user/$(id -u)"}
+readonly AIT_LAB_SOCKET_ROOT=${AIT_LAB_SOCKET_ROOT:-"$AIT_LAB_RUNTIME_ROOT/ait-lab"}
 readonly AIT_LAB_ACTIVE_FILE="$AIT_LAB_STATE_ROOT/active"
 readonly AIT_LAB_FIXTURES="$AIT_LAB_PROJECT_ROOT/tests/ait-lab/fixtures"
 readonly AIT_LAB_STUBS="$AIT_LAB_PROJECT_ROOT/tests/ait-lab/stubs"
@@ -30,6 +31,34 @@ die() {
 
 require_command() {
     command -v -- "$1" >/dev/null 2>&1 || die "required command is missing: $1"
+}
+
+validate_private_directory() {
+    local path=$1
+    local label=$2
+    local canonical permissions
+
+    [[ "$path" == /* ]] || die "$label must be an absolute path: $path"
+    [[ -d "$path" ]] || die "$label does not exist or is not a directory: $path"
+    [[ ! -L "$path" ]] || die "$label must not be a symbolic link: $path"
+    canonical=$(realpath -e -- "$path")
+    [[ "$canonical" == "$path" ]] || die "$label must not contain symbolic links or path aliases: $path"
+    [[ -O "$path" ]] || die "$label must be owned by the current user: $path"
+    permissions=$(stat -c '%a' -- "$path")
+    [[ "$permissions" == 700 ]] || die "$label must have mode 700: $path"
+}
+
+prepare_socket_root() {
+    local socket_parent
+
+    [[ "$AIT_LAB_SOCKET_ROOT" == /* ]] || die "socket directory must be an absolute path: $AIT_LAB_SOCKET_ROOT"
+    [[ "${AIT_LAB_SOCKET_ROOT##*/}" == ait-lab ]] || die "socket directory must use the dedicated ait-lab name: $AIT_LAB_SOCKET_ROOT"
+    socket_parent=$(dirname -- "$AIT_LAB_SOCKET_ROOT")
+    validate_private_directory "$socket_parent" 'socket parent directory'
+    if [[ ! -e "$AIT_LAB_SOCKET_ROOT" ]]; then
+        mkdir -- "$AIT_LAB_SOCKET_ROOT" || die "could not create socket directory: $AIT_LAB_SOCKET_ROOT"
+    fi
+    validate_private_directory "$AIT_LAB_SOCKET_ROOT" 'socket directory'
 }
 
 implementation_directory() {
@@ -259,7 +288,7 @@ write_manifest() {
 
     if git -C "$source" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
         revision=$(git -C "$source" rev-parse HEAD)
-        source_status=$(git -C "$source" status --short)
+        source_status=$(git -C "$source" status --short -- .)
     fi
     snapshot_digest=$(tar -C "$session/source" \
         --sort=name \
@@ -499,8 +528,7 @@ start_session() {
     [[ -n "$bus_address" ]] || die 'DBUS_SESSION_BUS_ADDRESS is not set; a live session bus is required for the tray'
     sandbox_binary=$(jq -r '.sandboxBinary' "$session/manifest.json")
     rm -f -- "$session/runtime/ready"
-    mkdir -p -- "$AIT_LAB_SOCKET_ROOT"
-    chmod 700 -- "$AIT_LAB_SOCKET_ROOT"
+    prepare_socket_root
     proxy_hash=$(printf '%s' "$session" | sha256sum)
     proxy_name="${proxy_hash%% *}"
     proxy_name="${proxy_name:0:16}.sock"
@@ -564,7 +592,10 @@ use_implementation() {
     require_command bwrap
     require_command jq
     require_command sha256sum
+    require_command stat
     require_command tar
+    umask 077
+    prepare_socket_root
     mapfile -t source_details < <(resolve_source "$implementation")
     ((${#source_details[@]} == 2)) || die "failed to resolve implementation source: $implementation"
     source=${source_details[0]}
@@ -575,7 +606,6 @@ use_implementation() {
     cargo_cache="$AIT_LAB_STATE_ROOT/cargo-home"
     rust_toolchain=$(toolchain_root)
 
-    umask 077
     mkdir -p -- "$session" "$build_target" "$cargo_cache"
     seed_session "$session"
     snapshot_source "$source" "$session"
@@ -657,6 +687,7 @@ if [[ "${1:-}" == __supervise ]]; then
     [[ $# -eq 6 ]] || exit 2
     AIT_LAB_INTERNAL_SESSION=$(validate_session_directory "$2")
     [[ "$3" == "$(jq -r '.sandboxBinary' "$AIT_LAB_INTERNAL_SESSION/manifest.json")" ]] || exit 2
+    prepare_socket_root
     case "$(realpath -m -- "$5")" in
         "$(realpath -m -- "$AIT_LAB_SOCKET_ROOT")"/*.sock) ;;
         *) exit 2 ;;
