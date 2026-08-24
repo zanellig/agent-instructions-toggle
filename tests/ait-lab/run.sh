@@ -116,7 +116,7 @@ assert_socket_root_rejected() {
         AIT_LAB_SOCKET_ROOT="$socket_directory" \
         AIT_LAB_CLAUDE_EXECUTABLE="$FAKE_CLAUDE" \
         AIT_LAB_SESSION_BUS_ADDRESS="$LAB_BUS_ADDRESS" \
-        "$lab" use claude 2>&1)
+        "$lab" use claude --no-plasma-shortcut 2>&1)
     status=$?
     set -e
     assert_equal "1" "$status" "use should reject an unsafe socket directory"
@@ -170,16 +170,16 @@ test_use_starts_an_isolated_candidate() {
         AIT_LAB_SOCKET_ROOT="$TEST_RUNTIME/ait-lab" \
         AIT_LAB_CLAUDE_EXECUTABLE="$FAKE_CLAUDE" \
         AIT_LAB_SESSION_BUS_ADDRESS="$LAB_BUS_ADDRESS" \
-        "$local_lab" use claude)
+        "$local_lab" use claude --no-plasma-shortcut)
     assert_contains "from implementations/claude" "$output" "use should select an in-repo implementation"
     output=$(AIT_LAB_STATE_ROOT="$local_state" AIT_LAB_SOCKET_ROOT="$TEST_RUNTIME/ait-lab" "$local_lab" show)
     AIT_LAB_STATE_ROOT="$local_state" AIT_LAB_SOCKET_ROOT="$TEST_RUNTIME/ait-lab" "$local_lab" stop >/dev/null
     assert_contains "Source: implementations/claude" "$output" "show should report the in-repo source"
     assert_contains "Source tree: clean" "$output" "show should scope dirtiness to the selected project"
 
-    output=$(run_lab use claude)
+    output=$(run_lab use claude --no-plasma-shortcut)
     assert_contains "Using claude" "$output" "use should report the selected implementation"
-    [[ ! -e "$TEST_HOST_DESKTOP" ]] || fail "default use registered a host shortcut"
+    [[ ! -e "$TEST_HOST_DESKTOP" ]] || fail "opt-out use registered a host shortcut"
 
     output=$(run_lab show)
     assert_contains "Implementation: claude" "$output" "show should name the active implementation"
@@ -220,13 +220,13 @@ test_use_starts_an_isolated_candidate() {
     assert_equal "23" "$probe_status" "the candidate should not write lab control files"
     assert_contains "blocked:" "$output" "the candidate should observe read-only lab metadata"
 
-    output=$(run_lab use codex-nc)
+    output=$(run_lab use codex-nc --no-plasma-shortcut)
     assert_contains "Using codex-nc" "$output" "use should switch installer adapters"
     assert_session_stopped "$claude_session"
     output=$(run_lab show)
     assert_contains "Implementation: codex-nc" "$output" "show should report the switched implementation"
 
-    output=$(run_lab use codex-fc)
+    output=$(run_lab use codex-fc --no-plasma-shortcut)
     assert_contains "Using codex-fc" "$output" "use should select the full-context implementation"
 
     output=$(run_lab show)
@@ -237,18 +237,18 @@ test_use_starts_an_isolated_candidate() {
     assert_equal "No active lab session." "$output" "stop should clear the active session"
 }
 
-test_plasma_shortcut_registration() {
+test_default_plasma_shortcut_registration() {
     local output shortcut_status
 
     mkdir -p "$(dirname -- "$TEST_HOST_DESKTOP")"
     printf '[Desktop Entry]\nName=Not owned by the lab\n' > "$TEST_HOST_DESKTOP"
-    output=$(run_lab use claude)
-    assert_contains "Using claude" "$output" "default use should ignore unrelated host shortcut files"
-    [[ -f "$TEST_HOST_DESKTOP" ]] || fail "default use removed an unrelated host desktop entry"
+    output=$(run_lab use claude --no-plasma-shortcut)
+    assert_contains "Using claude" "$output" "opt-out use should ignore unrelated host shortcut files"
+    [[ -f "$TEST_HOST_DESKTOP" ]] || fail "opt-out use removed an unrelated host desktop entry"
     run_lab stop >/dev/null
     [[ -f "$TEST_HOST_DESKTOP" ]] || fail "stop removed an unrelated host desktop entry"
     set +e
-    output=$(run_lab use claude --plasma-shortcut 2>&1)
+    output=$(run_lab use claude 2>&1)
     shortcut_status=$?
     set -e
     assert_equal "1" "$shortcut_status" "use should reject a host desktop-file ownership conflict"
@@ -257,14 +257,14 @@ test_plasma_shortcut_registration() {
 
     printf '%s\n' org.example.existing.desktop _launch Existing 'Existing shortcut' > "$TEST_KGLOBALACCEL_OWNER"
     set +e
-    output=$(run_lab use claude --plasma-shortcut 2>&1)
+    output=$(run_lab use claude 2>&1)
     shortcut_status=$?
     set -e
     assert_equal "1" "$shortcut_status" "use should reject a live shortcut conflict"
     assert_contains "already belongs to Existing" "$output" "use should name the conflicting shortcut owner"
     rm -f -- "$TEST_KGLOBALACCEL_OWNER"
 
-    output=$(run_lab use claude --plasma-shortcut)
+    output=$(run_lab use claude)
     assert_contains "Plasma shortcut: registered" "$output" "use should report host shortcut registration"
     [[ -f "$TEST_HOST_DESKTOP" ]] || fail "use did not create the host desktop entry"
     output=$(<"$TEST_HOST_DESKTOP")
@@ -277,20 +277,20 @@ test_plasma_shortcut_registration() {
     output=$(run_lab app status)
     assert_equal "off" "$output" "the host shortcut bridge should toggle the active candidate"
 
-    run_lab use codex-nc --plasma-shortcut >/dev/null
+    run_lab use codex-nc >/dev/null
     output=$(run_lab shortcut)
     assert_contains "notification: implicit" "$output" "the codex-nc shortcut should use its implicit notification"
 
-    run_lab use codex-fc --plasma-shortcut >/dev/null
+    run_lab use codex-fc >/dev/null
     output=$(run_lab shortcut)
     assert_contains "notification: requested" "$output" "the codex-fc shortcut should request a notification"
 
-    run_lab use claude >/dev/null
-    [[ ! -e "$TEST_HOST_DESKTOP" ]] || fail "switching without the option left the host desktop entry installed"
+    run_lab use claude --no-plasma-shortcut >/dev/null
+    [[ ! -e "$TEST_HOST_DESKTOP" ]] || fail "switching with the opt-out left the host desktop entry installed"
     output=$(run_lab show)
     assert_contains "Plasma shortcut: disabled" "$output" "show should report that host shortcut registration is disabled"
 
-    run_lab use codex-nc --plasma-shortcut >/dev/null
+    run_lab use codex-nc >/dev/null
     run_lab stop >/dev/null
     [[ ! -e "$TEST_HOST_DESKTOP" ]] || fail "stop left the host desktop entry installed"
     output=$(<"$TEST_KGLOBALACCEL_LOG")
@@ -301,5 +301,5 @@ test_plasma_shortcut_registration() {
 
 test_show_reports_no_active_session
 test_use_starts_an_isolated_candidate
-test_plasma_shortcut_registration
+test_default_plasma_shortcut_registration
 printf 'PASS: ait-lab interface tests\n'

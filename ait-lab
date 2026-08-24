@@ -25,7 +25,7 @@ AIT_LAB_SUPERVISED_TRAY_PID=""
 
 usage() {
     printf '%s\n' \
-        'usage: ./ait-lab use <claude|codex-nc|codex-fc> [--plasma-shortcut]' \
+        'usage: ./ait-lab use <claude|codex-nc|codex-fc> [--no-plasma-shortcut]' \
         '       ./ait-lab app <arguments...>' \
         '       ./ait-lab shortcut' \
         '       ./ait-lab statusline <fixture>' \
@@ -1056,9 +1056,9 @@ fi
 case "${1:-}" in
     use)
         if [[ $# -eq 2 ]]; then
-            use_implementation "$2" false
-        elif [[ $# -eq 3 && "$3" == --plasma-shortcut ]]; then
             use_implementation "$2" true
+        elif [[ $# -eq 3 && "$3" == --no-plasma-shortcut ]]; then
+            use_implementation "$2" false
         else
             usage >&2
             exit 2
