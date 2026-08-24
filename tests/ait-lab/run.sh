@@ -127,10 +127,17 @@ test_use_starts_an_isolated_candidate() {
     local_project="$TEST_TEMP/local-project"
     local_lab="$local_project/ait-lab"
     local_state="$TEST_TEMP/local-state"
-    mkdir -p "$local_project/implementations" "$local_project/tests"
+    mkdir -p "$local_project/implementations/claude" "$local_project/tests"
     cp "$LAB" "$local_lab"
-    ln -s "$FAKE_CANDIDATE" "$local_project/implementations/claude"
+    cp "$FAKE_CANDIDATE/Cargo.lock" "$FAKE_CANDIDATE/Cargo.toml" \
+        "$FAKE_CANDIDATE/install.sh" "$local_project/implementations/claude/"
+    cp -a "$FAKE_CANDIDATE/src" "$local_project/implementations/claude/src"
     ln -s "$TEST_ROOT/tests/ait-lab" "$local_project/tests/ait-lab"
+    git -C "$local_project" init -q
+    git -C "$local_project" add .
+    git -C "$local_project" -c user.name=ait-lab -c user.email=ait-lab.invalid \
+        -c commit.gpgsign=false commit -qm "test fixture"
+    printf 'unrelated change\n' > "$local_project/unrelated.txt"
 
     assert_socket_root_rejected "relative-runtime/ait-lab" "socket directory must be an absolute path" "$local_lab" "$local_state"
     private_runtime="$TEST_TEMP/private-runtime"
