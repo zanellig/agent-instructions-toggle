@@ -435,6 +435,7 @@ mod tests {
                 .map(|target| (*target).to_owned())
                 .collect(),
             collision_targets: Vec::new(),
+            claude_profile_directories: Vec::new(),
             watch_locations: WatchLocations {
                 home_directory: PathBuf::from("/tmp/home"),
                 profile_directories: Vec::new(),

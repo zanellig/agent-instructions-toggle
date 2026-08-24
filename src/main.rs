@@ -3,6 +3,7 @@ mod instruction_state;
 mod tray;
 
 use std::process::ExitCode;
+use std::{io, io::Write, os::unix::ffi::OsStrExt};
 
 use instruction_state::Action;
 
@@ -68,6 +69,21 @@ fn run(mut args: impl Iterator<Item = String>) -> Result<(), String> {
             Ok(())
         }
         "tray" if args.next().is_none() => tray::run(),
+        "profiles"
+            if args.next().as_deref() == Some("--claude")
+                && args.next().as_deref() == Some("--null")
+                && args.next().is_none() =>
+        {
+            let inspection = instruction_state::inspect().map_err(|error| error.to_string())?;
+            let mut stdout = io::stdout().lock();
+            for profile in inspection.claude_profile_directories {
+                stdout
+                    .write_all(profile.as_os_str().as_bytes())
+                    .and_then(|()| stdout.write_all(&[0]))
+                    .map_err(|error| format!("cannot write Claude profile list: {error}"))?;
+            }
+            Ok(())
+        }
         _ => Err(usage()),
     }
 }
@@ -96,6 +112,6 @@ fn print_inspection_warnings(inspection: &instruction_state::Inspection) {
 }
 
 fn usage() -> String {
-    "usage: agent-instructions status [--machine] | (enable | disable | toggle) [--notify] | tray"
+    "usage: agent-instructions status [--machine] | (enable | disable | toggle) [--notify] | tray | profiles --claude --null"
         .to_owned()
 }

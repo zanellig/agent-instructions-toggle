@@ -12,11 +12,11 @@ _Avoid_: Prompt file, rules file
 An instruction document controlled by this tool, including its recognized and disabled names.
 _Avoid_: Watched file
 
-**Active Codex profile**:
-An immediate home-directory child whose name starts with `.codex`, is a directory or directory symlink, and is not backup-like. Backup-like names end in `~` or contain a separator-delimited `bak`, `backup`, `old`, `orig`, `copy`, `archive`, `save`, or `disabled` token, ignoring ASCII case and allowing trailing digits.
+**Active agent profile**:
+An existing immediate home-directory child whose name starts with `.codex` or `.claude`, is a directory or directory symlink, and is not backup-like. Backup detection inspects the suffix after the prefix. A suffix is backup-like when it contains `bak`, `backup`, `archive`, `old`, `orig`, `copy`, `save`, or `disabled`, ignoring ASCII case, or when the full name ends in `~`. Codex profiles manage `AGENTS.md`; Claude profiles manage `CLAUDE.md`.
 
 **Profile discovery**:
-Recognition of active Codex profiles from the current home-directory entries. Each instruction-state inspection discovers profiles again and orders them deterministically.
+Recognition of active agent profiles from the current home-directory entries. Each instruction-state inspection discovers profiles again and orders them deterministically. Regular files, broken symlinks, and nonexistent default directories are not managed targets.
 
 **Instruction state**:
 The aggregate state derived from all managed targets: `on`, `off`, `mixed`, or `conflict`.

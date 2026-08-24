@@ -1,7 +1,8 @@
 use std::fs;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_TEMP_DIR: AtomicU64 = AtomicU64::new(0);
@@ -16,6 +17,7 @@ struct TestInstall {
     tools: PathBuf,
     cargo_log: PathBuf,
     metadata_log: PathBuf,
+    status_log: PathBuf,
 }
 
 impl TestInstall {
@@ -32,6 +34,7 @@ impl TestInstall {
         let tools = root.join("tools");
         let cargo_log = root.join("cargo.log");
         let metadata_log = root.join("metadata.log");
+        let status_log = root.join("status.log");
         for directory in [&home, &tools] {
             fs::create_dir_all(directory).unwrap();
         }
@@ -40,8 +43,8 @@ impl TestInstall {
         fs::write(
             &cargo,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\nmkdir -p \"$CARGO_TARGET_DIR/release\"\nprintf 'release-binary\\n' > \"$CARGO_TARGET_DIR/release/agent-instructions\"\nchmod 755 \"$CARGO_TARGET_DIR/release/agent-instructions\"\n",
-                cargo_log.display()
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\nmkdir -p \"$CARGO_TARGET_DIR/release\"\nprintf '%s\\n' '#!/bin/bash' 'if [[ \"$1 $2 $3\" == \"profiles --claude --null\" ]]; then' '  for profile in \"$HOME\"/.claude*; do' '    [[ -d \"$profile\" ]] && printf \"%s\\0\" \"$profile\"' '  done' 'elif [[ \"$1 $2\" == \"status --machine\" ]]; then' '  printf \"%s\\n\" \"${{AGENT_INSTRUCTIONS_TEST_STATE:-on}}\"' '  [[ -n \"${{AGENT_INSTRUCTIONS_TEST_WARNING:-}}\" ]] && printf \"Warning: %s\\n\" \"$AGENT_INSTRUCTIONS_TEST_WARNING\" >&2' 'fi' 'exit 0' > \"$CARGO_TARGET_DIR/release/agent-instructions\"\nchmod 755 \"$CARGO_TARGET_DIR/release/agent-instructions\"\n",
+                cargo_log.display(),
             ),
         )
         .unwrap();
@@ -67,6 +70,7 @@ impl TestInstall {
             tools,
             cargo_log,
             metadata_log,
+            status_log,
         }
     }
 
@@ -95,6 +99,20 @@ impl TestInstall {
     fn autostart_entry(&self) -> PathBuf {
         self.data_home.join("autostart").join(DESKTOP_FILE)
     }
+
+    fn claude_profile(&self, name: &str) -> PathBuf {
+        self.home.join(name)
+    }
+
+    fn status_wrapper(&self, name: &str) -> PathBuf {
+        self.claude_profile(name)
+            .join("agent-instructions-statusline.sh")
+    }
+
+    fn status_metadata(&self, name: &str) -> PathBuf {
+        self.claude_profile(name)
+            .join(".agent-instructions-statusline.json")
+    }
 }
 
 impl Drop for TestInstall {
@@ -117,9 +135,10 @@ fn installer_copies_release_binary_and_registers_the_plasma_shortcut_idempotentl
 
     assert!(first.status.success(), "{}", stderr(&first));
     let installed_binary = install.bin_home.join("agent-instructions");
-    assert_eq!(
-        fs::read_to_string(&installed_binary).unwrap(),
-        "release-binary\n"
+    assert!(
+        fs::read_to_string(&installed_binary)
+            .unwrap()
+            .contains("status --machine")
     );
     assert!(
         !fs::symlink_metadata(&installed_binary)
@@ -177,9 +196,10 @@ fn installer_copies_release_binary_and_registers_the_plasma_shortcut_idempotentl
     fs::write(&installed_binary, "stale\n").unwrap();
     let second = install.command(&[]);
     assert!(second.status.success(), "{}", stderr(&second));
-    assert_eq!(
-        fs::read_to_string(&installed_binary).unwrap(),
-        "release-binary\n"
+    assert!(
+        fs::read_to_string(&installed_binary)
+            .unwrap()
+            .contains("status --machine")
     );
     assert_eq!(
         fs::read_to_string(&install.metadata_log).unwrap(),
@@ -220,6 +240,170 @@ fn uninstaller_removes_only_owned_artifacts_and_refreshes_plasma_metadata() {
         fs::read_to_string(&install.metadata_log).unwrap(),
         "refreshed\nrefreshed\n"
     );
+}
+
+#[test]
+fn installer_extends_and_restores_each_claude_status_line_idempotently() {
+    let install = TestInstall::new();
+    let profile = install.claude_profile(".claude-work");
+    fs::create_dir_all(&profile).unwrap();
+    let existing_status = profile.join("existing-status.sh");
+    fs::write(
+        &existing_status,
+        format!(
+            "#!/bin/sh\ncat > \"{}\"\nprintf 'branch:main | ctx:42\\n'\n",
+            install.status_log.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&existing_status, fs::Permissions::from_mode(0o755)).unwrap();
+    let settings = profile.join("settings.json");
+    fs::write(
+        &settings,
+        format!(
+            "{{\n  \"theme\": \"dark\",\n  \"statusLine\": {{\n    \"type\": \"command\",\n    \"command\": \"{}\",\n    \"padding\": 1\n  }}\n}}\n",
+            existing_status.display()
+        ),
+    )
+    .unwrap();
+
+    let first = install.command(&[]);
+
+    assert!(first.status.success(), "{}", stderr(&first));
+    assert!(install.status_wrapper(".claude-work").exists());
+    assert!(install.status_metadata(".claude-work").exists());
+    let installed_settings = fs::read_to_string(&settings).unwrap();
+    assert!(installed_settings.contains("\"theme\": \"dark\""));
+    assert!(installed_settings.contains("agent-instructions-statusline.sh"));
+
+    let second = install.command(&[]);
+    assert!(second.status.success(), "{}", stderr(&second));
+    let changed_settings = fs::read_to_string(&settings)
+        .unwrap()
+        .replace("\"padding\": 1", "\"padding\": 2");
+    fs::write(&settings, changed_settings).unwrap();
+
+    let mut child = Command::new(install.status_wrapper(".claude-work"))
+        .env("HOME", &install.home)
+        .env("AGENT_INSTRUCTIONS_TEST_STATE", "on")
+        .env(
+            "AGENT_INSTRUCTIONS_TEST_WARNING",
+            "missing managed targets: .claude-empty/CLAUDE.md",
+        )
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(br#"{"cwd":"/tmp/project","model":{"display_name":"Opus"}}"#)
+        .unwrap();
+    let merged = child.wait_with_output().unwrap();
+    assert!(merged.status.success(), "{}", stderr(&merged));
+    assert_eq!(
+        String::from_utf8(merged.stdout).unwrap(),
+        "branch:main | ctx:42 | \u{1b}[32mAGENTS:on\u{1b}[0m \u{1b}[33m[missing managed targets: .claude-empty/CLAUDE.md]\u{1b}[0m\n"
+    );
+    assert_eq!(
+        fs::read_to_string(&install.status_log).unwrap(),
+        r#"{"cwd":"/tmp/project","model":{"display_name":"Opus"}}"#
+    );
+
+    let removed = install.command(&["--uninstall"]);
+    assert!(removed.status.success(), "{}", stderr(&removed));
+    assert!(!install.status_wrapper(".claude-work").exists());
+    assert!(!install.status_metadata(".claude-work").exists());
+    let restored_settings = fs::read_to_string(&settings).unwrap();
+    assert!(restored_settings.contains(&existing_status.display().to_string()));
+    assert!(restored_settings.contains("\"padding\": 2"));
+    assert!(restored_settings.contains("\"theme\": \"dark\""));
+}
+
+#[test]
+fn installer_refuses_unsafe_or_invalid_claude_settings_before_installing() {
+    for settings_content in [
+        r#"{"statusLine":{"type":"command","command":"printf ok | sed s/o/x/"}}"#,
+        r#"{"statusLine": "#,
+    ] {
+        let install = TestInstall::new();
+        let profile = install.claude_profile(".claude");
+        fs::create_dir_all(&profile).unwrap();
+        let settings = profile.join("settings.json");
+        fs::write(&settings, settings_content).unwrap();
+
+        let output = install.command(&[]);
+
+        assert!(!output.status.success());
+        assert_eq!(fs::read_to_string(&settings).unwrap(), settings_content);
+        assert!(!install.bin_home.join("agent-instructions").exists());
+        assert!(!install.status_wrapper(".claude").exists());
+        assert!(!install.status_metadata(".claude").exists());
+        assert!(
+            stderr(&output).contains("cannot safely extend")
+                || stderr(&output).contains("not a valid JSON object"),
+            "{}",
+            stderr(&output)
+        );
+    }
+}
+
+#[test]
+fn installer_adds_all_state_colors_and_removes_a_new_status_line_cleanly() {
+    let install = TestInstall::new();
+    let profile = install.claude_profile(".claude-team");
+    fs::create_dir_all(&profile).unwrap();
+
+    let installed = install.command(&[]);
+
+    assert!(installed.status.success(), "{}", stderr(&installed));
+    for (state, color) in [("on", 32), ("off", 90), ("mixed", 33), ("conflict", 31)] {
+        let output = Command::new(install.status_wrapper(".claude-team"))
+            .env("HOME", &install.home)
+            .env("AGENT_INSTRUCTIONS_TEST_STATE", state)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{}", stderr(&output));
+        assert_eq!(
+            String::from_utf8(output.stdout).unwrap(),
+            format!("\u{1b}[{color}mAGENTS:{state}\u{1b}[0m\n")
+        );
+    }
+
+    let removed = install.command(&["--uninstall"]);
+
+    assert!(removed.status.success(), "{}", stderr(&removed));
+    assert!(!profile.join("settings.json").exists());
+    assert!(!install.status_wrapper(".claude-team").exists());
+    assert!(!install.status_metadata(".claude-team").exists());
+}
+
+#[test]
+fn uninstaller_preserves_a_status_command_changed_after_installation() {
+    let install = TestInstall::new();
+    let profile = install.claude_profile(".claude");
+    fs::create_dir_all(&profile).unwrap();
+    let installed = install.command(&[]);
+    assert!(installed.status.success(), "{}", stderr(&installed));
+    let settings = profile.join("settings.json");
+    fs::write(
+        &settings,
+        r#"{"statusLine":{"type":"command","command":"/user/replacement"}}"#,
+    )
+    .unwrap();
+
+    let removed = install.command(&["--uninstall"]);
+
+    assert!(removed.status.success(), "{}", stderr(&removed));
+    assert_eq!(
+        fs::read_to_string(&settings).unwrap(),
+        r#"{"statusLine":{"type":"command","command":"/user/replacement"}}"#
+    );
+    assert!(!install.status_wrapper(".claude").exists());
+    assert!(!install.status_metadata(".claude").exists());
 }
 
 fn stderr(output: &Output) -> String {

@@ -55,6 +55,7 @@ pub struct Inspection {
     pub state: InstructionState,
     pub missing_targets: Vec<String>,
     pub collision_targets: Vec<String>,
+    pub claude_profile_directories: Vec<PathBuf>,
     pub watch_locations: WatchLocations,
 }
 
@@ -132,6 +133,7 @@ pub fn apply(action: Action) -> Result<ApplyResult, Error> {
             state: desired_state,
             missing_targets: snapshot.inspection.missing_targets,
             collision_targets: Vec::new(),
+            claude_profile_directories: snapshot.inspection.claude_profile_directories,
             watch_locations: snapshot.inspection.watch_locations,
         },
         recovered_mixed_state,
@@ -176,6 +178,11 @@ fn inspect_at(home: &Path) -> Result<Snapshot, Error> {
             state,
             missing_targets,
             collision_targets,
+            claude_profile_directories: targets
+                .iter()
+                .filter(|(target, _)| target.filename == "CLAUDE.md")
+                .map(|(target, _)| target.directory.clone())
+                .collect(),
             watch_locations: WatchLocations {
                 home_directory: home.to_owned(),
                 profile_directories: targets
@@ -197,16 +204,20 @@ fn discover_targets(home: &Path) -> Result<Vec<Target>, Error> {
     let entries = fs::read_dir(home).map_err(|error| Error {
         message: format!("cannot inspect home directory {}: {error}", home.display()),
     })?;
-    let mut codex_targets = Vec::new();
+    let mut targets = Vec::new();
 
     for entry in entries {
         let entry = entry.map_err(|error| Error {
             message: format!("cannot inspect an entry under {}: {error}", home.display()),
         })?;
         let name = entry.file_name();
-        if !is_codex_profile_name(&name) || is_backup_like_name(&name) {
+        let filename = if is_profile_name(&name, b".codex") {
+            "AGENTS.md"
+        } else if is_profile_name(&name, b".claude") {
+            "CLAUDE.md"
+        } else {
             continue;
-        }
+        };
         let file_type = entry.file_type().map_err(|error| Error {
             message: format!("cannot inspect {}: {error}", entry.path().display()),
         })?;
@@ -226,41 +237,48 @@ fn discover_targets(home: &Path) -> Result<Vec<Target>, Error> {
             false
         };
         if is_directory {
-            codex_targets.push(Target::new(
+            targets.push(Target::new(
                 entry.path(),
-                "AGENTS.md",
-                format!("{}/AGENTS.md", name.to_string_lossy()),
+                filename,
+                sanitize_label(&format!("{}/{filename}", name.to_string_lossy())),
             ));
         }
     }
 
-    codex_targets.sort_by(|left, right| left.directory.cmp(&right.directory));
-    codex_targets.push(Target::new(
-        home.join(".claude"),
-        "CLAUDE.md",
-        ".claude/CLAUDE.md".to_owned(),
-    ));
-    Ok(codex_targets)
+    targets.sort_by(|left, right| left.directory.cmp(&right.directory));
+    Ok(targets)
 }
 
-fn is_codex_profile_name(name: &std::ffi::OsStr) -> bool {
-    name.as_bytes().starts_with(b".codex")
+fn sanitize_label(label: &str) -> String {
+    label
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                '?'
+            } else {
+                character
+            }
+        })
+        .collect()
 }
 
-fn is_backup_like_name(name: &std::ffi::OsStr) -> bool {
+fn is_profile_name(name: &std::ffi::OsStr, prefix: &[u8]) -> bool {
+    name.as_bytes().starts_with(prefix) && !is_backup_like_name(name, prefix.len())
+}
+
+fn is_backup_like_name(name: &std::ffi::OsStr, prefix_length: usize) -> bool {
     let name = name.as_bytes();
-    name.ends_with(b"~")
-        || name
-            .split(|byte| !byte.is_ascii_alphanumeric())
-            .any(is_backup_token)
+    let suffix = &name[prefix_length..];
+    suffix.ends_with(b"~")
+        || BACKUP_TOKENS
+            .iter()
+            .any(|token| contains_ignore_ascii_case(suffix, token))
 }
 
-fn is_backup_token(segment: &[u8]) -> bool {
-    BACKUP_TOKENS.iter().any(|token| {
-        segment.len() >= token.len()
-            && segment[..token.len()].eq_ignore_ascii_case(token)
-            && segment[token.len()..].iter().all(u8::is_ascii_digit)
-    })
+fn contains_ignore_ascii_case(value: &[u8], needle: &[u8]) -> bool {
+    value
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 fn acquire_lock(home: &Path) -> Result<File, Error> {

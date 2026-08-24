@@ -132,8 +132,7 @@ fn notified_transition_names_missing_managed_targets() {
     assert!(output.status.success(), "{}", stderr(&output));
     let notification = fs::read_to_string(&desktop.notifications).unwrap();
     assert!(
-        notification
-            .contains("Missing managed targets: .codex-empty/AGENTS.md, .claude/CLAUDE.md."),
+        notification.contains("Missing managed targets: .codex-empty/AGENTS.md."),
         "{notification}"
     );
 }

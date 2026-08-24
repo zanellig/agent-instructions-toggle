@@ -1,4 +1,5 @@
 use std::fs;
+use std::os::unix::ffi::OsStringExt;
 use std::os::unix::fs::{PermissionsExt, symlink};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
@@ -144,7 +145,66 @@ fn status_reports_partial_absence_without_hiding_the_healthy_state() {
     assert_eq!(stdout(&status), "on\n");
     assert_eq!(
         stderr(&status),
-        "Warning: missing managed targets: .codex-alpha/AGENTS.md, .codex-zeta/AGENTS.md, .claude/CLAUDE.md\n"
+        "Warning: missing managed targets: .codex-alpha/AGENTS.md, .codex-zeta/AGENTS.md\n"
+    );
+}
+
+#[test]
+fn discovery_manages_active_claude_profiles_and_excludes_backups() {
+    let home = TestHome::new();
+    home.write_enabled(".claude", "CLAUDE.md");
+    home.write_enabled(".claude-work", "CLAUDE.md");
+    home.write_enabled(".claude-backup2", "CLAUDE.md");
+    home.write_enabled(".claudearchive", "CLAUDE.md");
+
+    let disable = home.command(&["disable"]);
+
+    assert!(disable.status.success(), "{}", stderr(&disable));
+    for profile in [".claude", ".claude-work"] {
+        assert_path_exists(&home.path(profile, "CLAUDE.md.no-auto-inject"));
+        assert!(!home.path(profile, "CLAUDE.md").exists());
+    }
+    for profile in [".claude-backup2", ".claudearchive"] {
+        assert_path_exists(&home.path(profile, "CLAUDE.md"));
+        assert!(!home.path(profile, "CLAUDE.md.no-auto-inject").exists());
+    }
+}
+
+#[test]
+fn profiles_lists_discovered_claude_directories_for_installers() {
+    let home = TestHome::new();
+    home.create_directory(".claude-work");
+    home.create_directory(".claude");
+    home.create_directory(".claude-old");
+    home.create_directory(".codex");
+
+    let profiles = home.command(&["profiles", "--claude", "--null"]);
+
+    assert!(profiles.status.success(), "{}", stderr(&profiles));
+    let expected = [home.home.join(".claude"), home.home.join(".claude-work")]
+        .into_iter()
+        .flat_map(|path| {
+            let mut bytes = path.into_os_string().into_encoded_bytes();
+            bytes.push(0);
+            bytes
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(profiles.stdout, expected);
+}
+
+#[test]
+fn status_sanitizes_control_characters_in_discovered_profile_names() {
+    let home = TestHome::new();
+    let unsafe_name = std::ffi::OsString::from_vec(b".claude-\x1b[31m".to_vec());
+    fs::create_dir(home.home.join(unsafe_name)).unwrap();
+
+    let status = home.command(&["status", "--machine"]);
+
+    assert!(status.status.success(), "{}", stderr(&status));
+    assert_eq!(stdout(&status), "conflict\n");
+    assert_eq!(
+        stderr(&status),
+        "Warning: missing managed targets: .claude-?[31m/CLAUDE.md\n"
     );
 }
 
@@ -231,7 +291,7 @@ fn mutation_warns_about_missing_targets_and_changes_healthy_targets() {
     assert_eq!(stdout(&disable), "Instruction state: off\n");
     assert_eq!(
         stderr(&disable),
-        "Warning: missing managed targets: .codex-empty/AGENTS.md, .claude/CLAUDE.md\n"
+        "Warning: missing managed targets: .codex-empty/AGENTS.md\n"
     );
     assert_path_exists(&home.path(".codex-work", "AGENTS.md.no-auto-inject"));
 }
@@ -403,8 +463,8 @@ fn discovery_excludes_backup_like_profiles_and_non_directories() {
     for profile in excluded {
         home.write_enabled(profile, "AGENTS.md");
     }
-    home.write_enabled(".codex-backupish", "AGENTS.md");
-    home.write_enabled(".codexold", "AGENTS.md");
+    home.write_enabled(".codex-team", "AGENTS.md");
+    home.write_enabled(".codexish", "AGENTS.md");
     fs::write(home.home.join(".codex-regular-file"), "not a profile\n").unwrap();
 
     let disable = home.command(&["disable"]);
@@ -414,7 +474,7 @@ fn discovery_excludes_backup_like_profiles_and_non_directories() {
         assert_path_exists(&home.path(profile, "AGENTS.md"));
         assert!(!home.path(profile, "AGENTS.md.no-auto-inject").exists());
     }
-    for profile in [".codex-backupish", ".codexold"] {
+    for profile in [".codex-team", ".codexish"] {
         assert_path_exists(&home.path(profile, "AGENTS.md.no-auto-inject"));
         assert!(!home.path(profile, "AGENTS.md").exists());
     }
