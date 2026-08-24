@@ -9,7 +9,7 @@ use std::sync::mpsc;
 use ksni::blocking::TrayMethods;
 use ksni::menu::StandardItem;
 use ksni::{Icon, MenuItem, ToolTip};
-use notify::{Event, RecursiveMode, Watcher};
+use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 
 use crate::state::{self, Action, Report};
 use crate::ui;
@@ -143,11 +143,7 @@ pub fn run() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    for dir in state::watched_dirs().unwrap_or_default() {
-        // A profile directory that does not exist is a warning, not a reason to
-        // refuse to run.
-        let _ = watcher.watch(&dir, RecursiveMode::NonRecursive);
-    }
+    watch_all(&mut watcher);
 
     for received in &rx {
         let Ok(event) = received else { continue };
@@ -156,18 +152,27 @@ pub fn run() -> ExitCode {
         }
         // Collapse the burst a single rename produces into one refresh.
         while rx.try_recv().is_ok() {}
+        // Watch before reading. The event may have been a profile appearing,
+        // and a profile discovered just now needs a watch of its own; taking
+        // the watch first means a document written into it in the meantime is
+        // still picked up by the refresh below.
+        watch_all(&mut watcher);
         handle.update(|tray: &mut AgentTray| tray.refresh());
     }
 
     ExitCode::SUCCESS
 }
 
+fn watch_all(watcher: &mut RecommendedWatcher) {
+    for dir in state::watched_dirs().unwrap_or_default() {
+        // A profile directory that does not exist is a warning, not a reason to
+        // refuse to run. Re-watching a directory already watched is a no-op.
+        let _ = watcher.watch(&dir, RecursiveMode::NonRecursive);
+    }
+}
+
 fn relevant(event: &Event) -> bool {
-    event.paths.iter().any(|path| {
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(state::is_managed_name)
-    })
+    event.paths.iter().any(|path| state::is_relevant_path(path))
 }
 
 fn icon(report: &Report) -> Icon {

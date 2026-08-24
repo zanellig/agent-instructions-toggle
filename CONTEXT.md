@@ -8,6 +8,14 @@ Controls whether global instruction documents are discoverable when a coding age
 A global document whose recognized filename causes a coding agent to add its contents to a new context.
 _Avoid_: Prompt file, rules file
 
+**Agent home**:
+A directory under `$HOME` whose name marks it as a coding agent's configuration root. Managed targets are derived from the agent homes found by discovery, never from a fixed list.
+_Avoid_: Profile directory, config directory
+
+**Backup profile**:
+An agent home whose name carries an archive word such as `backup`, `bak`, or `old`. Discovery finds it, reports it, and never modifies it.
+_Avoid_: Excluded target, ignored file
+
 **Managed target**:
 An instruction document controlled by this tool, including its recognized and disabled names.
 _Avoid_: Watched file

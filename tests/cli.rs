@@ -55,6 +55,9 @@ impl Home {
     }
 
     fn write(&self, rel: &str, contents: &str) {
+        if let Some(parent) = self.path(rel).parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
         fs::write(self.path(rel), contents).unwrap();
     }
 
@@ -215,12 +218,20 @@ fn machine_status_prints_one_token() {
 fn human_status_names_the_state_and_the_missing_targets() {
     let home = Home::populated();
     fs::remove_file(home.path(".codex_p2/AGENTS.md")).unwrap();
+    // The Claude home stays a managed target even when the directory is gone,
+    // so its absence is a warning rather than a silent omission.
+    fs::remove_dir_all(home.path(".claude")).unwrap();
 
     let run = home.run(&["status"]);
     assert!(run.ok);
     assert!(run.out.contains("AGENTS: on"), "{}", run.out);
     assert!(
         run.out.contains("missing: ~/.codex_p2/AGENTS.md"),
+        "{}",
+        run.out
+    );
+    assert!(
+        run.out.contains("missing: ~/.claude/CLAUDE.md"),
         "{}",
         run.out
     );
@@ -314,6 +325,86 @@ fn the_backup_codex_home_is_never_touched() {
 }
 
 #[test]
+fn a_profile_added_later_is_discovered() {
+    let home = Home::populated();
+    home.write(
+        ".codex_work/AGENTS.md",
+        "a profile this tool never heard of",
+    );
+
+    assert!(home.run(&["disable"]).ok);
+    assert!(home.exists(&format!(".codex_work/AGENTS.md{DISABLED}")));
+    assert_eq!(home.state(), "off");
+}
+
+#[test]
+fn a_profile_reached_through_a_directory_symlink_is_managed() {
+    let home = Home::populated();
+    let real = home.path("elsewhere/codex-profile");
+    fs::create_dir_all(&real).unwrap();
+    fs::write(real.join("AGENTS.md"), "a profile behind a symlink").unwrap();
+    std::os::unix::fs::symlink(&real, home.path(".codex_linked")).unwrap();
+
+    assert!(home.run(&["disable"]).ok);
+    assert!(
+        real.join(format!("AGENTS.md{DISABLED}")).exists(),
+        "a directory symlink is a profile like any other"
+    );
+    assert_eq!(home.state(), "off");
+}
+
+#[test]
+fn backup_profiles_are_skipped_and_reported() {
+    let home = Home::populated();
+    let archives = [
+        ".codex.bak/AGENTS.md",
+        ".codex_backup2/AGENTS.md",
+        ".codex-OLD/AGENTS.md",
+        ".codex_p~/AGENTS.md",
+    ];
+    for archive in archives {
+        home.write(archive, "archived");
+    }
+
+    let run = home.run(&["status"]);
+    assert!(run.ok);
+    for archive in archives {
+        let dir = archive.split('/').next().unwrap();
+        assert!(
+            run.out.contains(&format!("ignored: ~/{dir}")),
+            "{dir} should be listed as ignored:\n{}",
+            run.out
+        );
+    }
+
+    assert!(home.run(&["disable"]).ok);
+    for archive in archives {
+        assert!(home.exists(archive), "{archive} must not be renamed");
+    }
+}
+
+#[test]
+fn a_working_profile_is_not_mistaken_for_a_backup() {
+    let home = Home::populated();
+    // "bold" contains "old" but is not the word "old".
+    home.write(".codex_bold/AGENTS.md", "a real profile");
+    // Not a profile: the suffix does not start at a separator or a digit.
+    home.write(".codexrc/AGENTS.md", "unrelated dotfile directory");
+    // Not a directory.
+    home.write(".claude.json", "{}");
+
+    let run = home.run(&["status"]);
+    assert!(run.ok);
+    assert!(!run.out.contains(".codex_bold"), "{}", run.out);
+    assert!(!run.out.contains(".codexrc"), "{}", run.out);
+
+    assert!(home.run(&["disable"]).ok);
+    assert!(home.exists(&format!(".codex_bold/AGENTS.md{DISABLED}")));
+    assert!(home.exists(".codexrc/AGENTS.md"), "not an agent home");
+    assert!(home.exists(".claude.json"), "not a directory");
+}
+
+#[test]
 fn concurrent_toggles_serialize() {
     let home = Home::populated();
 
@@ -334,9 +425,9 @@ fn concurrent_toggles_serialize() {
 fn a_failed_rename_rolls_back_the_completed_ones() {
     let home = Home::populated();
 
-    // `.claude` sorts last in the rename order, so three renames succeed before
-    // this one fails.
-    let dir = home.path(".claude");
+    // Targets are renamed in sorted order, so `.claude`, `.codex` and
+    // `.codex_p` all succeed before this one fails.
+    let dir = home.path(".codex_p2");
     fs::set_permissions(&dir, fs::Permissions::from_mode(0o555)).unwrap();
     if fs::write(dir.join("probe"), "").is_ok() {
         let _ = fs::remove_file(dir.join("probe"));

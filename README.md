@@ -6,16 +6,54 @@ contexts, without deleting or editing them.
 Disabling renames each managed document to a name no coding agent recognizes:
 
 ```
-~/.codex/AGENTS.md      ->  ~/.codex/AGENTS.md.no-auto-inject
-~/.codex_p/AGENTS.md    ->  ~/.codex_p/AGENTS.md.no-auto-inject
-~/.codex_p2/AGENTS.md   ->  ~/.codex_p2/AGENTS.md.no-auto-inject
-~/.claude/CLAUDE.md     ->  ~/.claude/CLAUDE.md.no-auto-inject
+~/.codex/AGENTS.md   ->  ~/.codex/AGENTS.md.no-auto-inject
+~/.claude/CLAUDE.md  ->  ~/.claude/CLAUDE.md.no-auto-inject
 ```
 
 Contents and permissions are untouched. Enabling renames them back.
-`~/.codex_backup` is deliberately not managed, so archived files stay put.
 
 Linux only.
+
+## What gets managed
+
+Codex profiles are discovered under `$HOME` on every run. Nothing is
+hard-coded and there is no configuration file, so a profile you add later is
+picked up without touching this tool.
+
+| Target | How it is found | Document |
+|---|---|---|
+| Codex profiles | every directory under `$HOME` named `.codex` or `.codex` plus a separator or a digit | `AGENTS.md` |
+| Claude Code | the default home, `~/.claude` | `CLAUDE.md` |
+
+So `.codex`, `.codex2`, `.codex_p2` and `.codex-work` are all profiles, while
+`.codexrc` is an unrelated dotfile: the suffix has to start at a separator or a
+digit. A symlink to a directory counts as a profile. Plain files never do, so
+`.claude.json` is not a target.
+
+Claude Code reads one global document, so `~/.claude` is fixed rather than
+discovered. It stays a managed target even if the directory is missing, which
+is what turns an absent `CLAUDE.md` into a reported warning.
+
+### Backup profiles are left alone
+
+A profile whose name carries one of these words is treated as an archive and
+skipped: `archive`, `archived`, `backup`, `backups`, `bak`, `copy`, `disabled`,
+`old`, `orig`, `original`, `save`, `saved`. A trailing `~` counts too.
+
+Matching is on whole words, so `.codex_old` is a backup and `.codex_bold` is a
+real profile. `.codex.bak`, `.codex_backup2`, `.codex-OLD` and `.codex_p~` are
+all skipped.
+
+Skipped profiles are listed by `agent-instructions status`:
+
+```
+AGENTS: on
+New agent contexts load your global instructions.
+ignored: ~/.codex_backup (looks like a backup)
+```
+
+That line is there so a profile the tool declines to manage is never a silent
+omission. If one of your real profiles shows up in it, rename the directory.
 
 ## Install
 
@@ -108,9 +146,10 @@ session and starting a new one is the only way to pick up a change.
 
 ## The tray
 
-The tray is a windowless StatusNotifier item. It watches the managed
-directories with native filesystem events, so it costs nothing while idle and
-never reconciles anything on its own.
+The tray is a windowless StatusNotifier item. Native filesystem events watch
+`$HOME`, so a profile you add or remove shows up right away, and each managed
+directory, for changes to the documents. It costs nothing while idle and never
+reconciles anything on its own.
 
 | Color | State |
 |---|---|

@@ -76,6 +76,12 @@ rm "$FAKE/.codex_p2/AGENTS.md.no-auto-inject"
 sleep 2
 check "names the missing document" "~/.codex_p2/AGENTS.md" "$(prop ToolTip)"
 
+echo "==> a profile added while the tray is running"
+mkdir -p "$FAKE/.codex_added"
+printf 'instructions\n' >"$FAKE/.codex_added/AGENTS.md"
+sleep 2
+check "notices a new profile" "AGENTS: mixed" "$(prop ToolTip)"
+
 echo
 if [ "$failures" -gt 0 ]; then
   echo "$failures check(s) failed"

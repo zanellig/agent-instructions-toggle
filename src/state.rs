@@ -13,14 +13,23 @@ use std::path::{Path, PathBuf};
 /// Appended to a recognized filename to make it unrecognizable to coding agents.
 pub const DISABLED_SUFFIX: &str = ".no-auto-inject";
 
-/// The fixed production target set, in rename order.
-///
-/// `.codex_backup` is deliberately absent: archived files stay untouched.
-const TARGETS: &[(&str, &str)] = &[
-    (".codex", "AGENTS.md"),
-    (".codex_p", "AGENTS.md"),
-    (".codex_p2", "AGENTS.md"),
-    (".claude", "CLAUDE.md"),
+/// Codex profiles are discovered: any immediate child of `$HOME` whose name
+/// starts with this prefix is a candidate. Nothing about them is hard-coded.
+const CODEX_PREFIX: &str = ".codex";
+const CODEX_DOCUMENT: &str = "AGENTS.md";
+
+/// Claude Code reads exactly one global document, so its home is fixed. It stays
+/// a managed target whether or not it exists, which is what makes an absent
+/// document a reported warning rather than a silent omission.
+const CLAUDE_HOME: &str = ".claude";
+const CLAUDE_DOCUMENT: &str = "CLAUDE.md";
+
+/// A profile whose name carries one of these words is an archive, not a working
+/// profile, so it is left alone. Matching is on whole words: `.codex_old` is a
+/// backup, `.codex_bold` is a real profile.
+const BACKUP_WORDS: &[&str] = &[
+    "archive", "archived", "backup", "backups", "bak", "copy", "disabled", "old", "orig",
+    "original", "save", "saved",
 ];
 
 /// The aggregate state derived from all managed targets.
@@ -66,6 +75,9 @@ pub struct Report {
     pub missing: Vec<String>,
     /// Labels of targets where both names exist.
     pub collisions: Vec<String>,
+    /// Agent homes skipped as backups. Reported so that a profile this tool
+    /// declines to manage is never a silent omission.
+    pub ignored: Vec<String>,
 }
 
 /// The result of a completed mutation.
@@ -93,7 +105,7 @@ impl fmt::Display for Error {
                 if report.collisions.is_empty() {
                     write!(
                         f,
-                        "conflict: no managed instruction documents found; no files changed"
+                        "conflict: no managed instruction documents found under any agent home; no files changed"
                     )
                 } else {
                     write!(
@@ -116,6 +128,13 @@ struct Target {
     disabled: PathBuf,
 }
 
+/// What one scan of `$HOME` found.
+struct Discovery {
+    /// Sorted, so the rename order is the same on every run.
+    targets: Vec<Target>,
+    ignored: Vec<String>,
+}
+
 #[derive(Copy, Clone, PartialEq, Eq)]
 enum Presence {
     Enabled,
@@ -126,16 +145,17 @@ enum Presence {
 
 /// Inspect the managed targets without changing anything.
 pub fn inspect() -> Result<Report, Error> {
-    Ok(report(&targets()?))
+    Ok(report(&discover()?))
 }
 
 /// Apply `action`, or recover a mixed state and stop.
 pub fn apply(action: Action) -> Result<Outcome, Error> {
-    let targets = targets()?;
     // Held until the end of the function: every mutation is serialized.
     let _lock = acquire_lock()?;
+    let discovery = discover()?;
+    let targets = &discovery.targets;
 
-    let report = report(&targets);
+    let report = report(&discovery);
     if report.state == State::Conflict {
         return Err(Error::Conflict(report));
     }
@@ -143,7 +163,7 @@ pub fn apply(action: Action) -> Result<Outcome, Error> {
     // Conservative recovery: reconcile to `on`, report it, and stop. A second
     // deliberate action may then disable.
     if report.state == State::Mixed {
-        let moves = plan(&targets, State::On);
+        let moves = plan(targets, State::On);
         rename_all(&moves)?;
         return Ok(Outcome {
             state: State::On,
@@ -160,7 +180,7 @@ pub fn apply(action: Action) -> Result<Outcome, Error> {
         Action::Toggle => State::On,
     };
 
-    let moves = plan(&targets, desired);
+    let moves = plan(targets, desired);
     rename_all(&moves)?;
     Ok(Outcome {
         state: desired,
@@ -170,32 +190,101 @@ pub fn apply(action: Action) -> Result<Outcome, Error> {
     })
 }
 
-/// Parent directories the tray watches for native filesystem events.
+/// Directories the tray watches for native filesystem events: `$HOME`, so that
+/// a profile appearing or disappearing is noticed, and every managed directory,
+/// for changes to the documents themselves.
 pub fn watched_dirs() -> Result<Vec<PathBuf>, Error> {
-    Ok(targets()?
-        .iter()
-        .filter_map(|t| t.enabled.parent().map(Path::to_path_buf))
-        .collect())
+    let home = home()?;
+    let mut dirs = vec![home];
+    dirs.extend(
+        discover()?
+            .targets
+            .iter()
+            .filter_map(|t| t.enabled.parent().map(Path::to_path_buf)),
+    );
+    Ok(dirs)
 }
 
-/// True when `name` is a filename this tool manages.
-pub fn is_managed_name(name: &str) -> bool {
-    let base = name.strip_suffix(DISABLED_SUFFIX).unwrap_or(name);
-    TARGETS.iter().any(|(_, recognized)| *recognized == base)
+/// True when a filesystem event at `path` could change the instruction state:
+/// either a managed document, or a profile directory coming or going.
+pub fn is_relevant_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+        return false;
+    };
+    let document = name.strip_suffix(DISABLED_SUFFIX).unwrap_or(name);
+    document == CODEX_DOCUMENT
+        || document == CLAUDE_DOCUMENT
+        || name == CLAUDE_HOME
+        || codex_profile_suffix(name).is_some()
 }
 
-fn targets() -> Result<Vec<Target>, Error> {
-    let home = env::var_os("HOME")
+/// Find the working Codex profiles under `$HOME`, and add the fixed Claude home.
+fn discover() -> Result<Discovery, Error> {
+    let home = home()?;
+    let entries = fs::read_dir(&home)
+        .map_err(|err| Error::Failed(format!("cannot read {}: {err}", home.display())))?;
+
+    let mut targets = vec![target(&home, CLAUDE_HOME, CLAUDE_DOCUMENT)];
+    let mut ignored = Vec::new();
+    for entry in entries.flatten() {
+        let file_name = entry.file_name();
+        let Some(name) = file_name.to_str() else {
+            continue;
+        };
+        let Some(suffix) = codex_profile_suffix(name) else {
+            continue;
+        };
+        // `is_dir` follows symlinks, so a profile reached through one counts.
+        if !entry.path().is_dir() {
+            continue;
+        }
+        if is_backup(suffix) {
+            ignored.push(format!("~/{name}"));
+            continue;
+        }
+        targets.push(target(&home, name, CODEX_DOCUMENT));
+    }
+
+    // `read_dir` order is whatever the filesystem hands back. Sorting keeps the
+    // rename order, and therefore the rollback order, reproducible.
+    targets.sort_by(|a, b| a.enabled.cmp(&b.enabled));
+    ignored.sort();
+    Ok(Discovery { targets, ignored })
+}
+
+fn target(home: &Path, dir: &str, document: &str) -> Target {
+    Target {
+        label: format!("~/{dir}/{document}"),
+        enabled: home.join(dir).join(document),
+        disabled: home.join(dir).join(format!("{document}{DISABLED_SUFFIX}")),
+    }
+}
+
+/// The part of a Codex profile directory name that identifies the profile, or
+/// `None` when the name is not a profile at all.
+///
+/// A suffix has to start at a separator or a digit, so `.codex_p2` and `.codex2`
+/// are profiles while `.codexrc` is an unrelated dotfile.
+fn codex_profile_suffix(name: &str) -> Option<&str> {
+    let suffix = name.strip_prefix(CODEX_PREFIX)?;
+    match suffix.chars().next() {
+        None => Some(suffix),
+        Some(c) if c.is_ascii_digit() || c == '_' || c == '-' || c == '.' => Some(suffix),
+        Some(_) => None,
+    }
+}
+
+fn is_backup(suffix: &str) -> bool {
+    suffix.ends_with('~')
+        || suffix
+            .split(|c: char| !c.is_ascii_alphabetic())
+            .any(|word| BACKUP_WORDS.contains(&word.to_ascii_lowercase().as_str()))
+}
+
+fn home() -> Result<PathBuf, Error> {
+    env::var_os("HOME")
         .map(PathBuf::from)
-        .ok_or_else(|| Error::Failed("HOME is not set".into()))?;
-    Ok(TARGETS
-        .iter()
-        .map(|(dir, name)| Target {
-            label: format!("~/{dir}/{name}"),
-            enabled: home.join(dir).join(name),
-            disabled: home.join(dir).join(format!("{name}{DISABLED_SUFFIX}")),
-        })
-        .collect())
+        .ok_or_else(|| Error::Failed("HOME is not set".into()))
 }
 
 fn presence(target: &Target) -> Presence {
@@ -207,12 +296,12 @@ fn presence(target: &Target) -> Presence {
     }
 }
 
-fn report(targets: &[Target]) -> Report {
+fn report(discovery: &Discovery) -> Report {
     let mut missing = Vec::new();
     let mut collisions = Vec::new();
     let (mut on, mut off) = (0usize, 0usize);
 
-    for target in targets {
+    for target in &discovery.targets {
         match presence(target) {
             Presence::Enabled => on += 1,
             Presence::Disabled => off += 1,
@@ -237,6 +326,7 @@ fn report(targets: &[Target]) -> Report {
         state,
         missing,
         collisions,
+        ignored: discovery.ignored.clone(),
     }
 }
 
@@ -342,10 +432,7 @@ pub(crate) fn runtime_dir() -> Result<PathBuf, Error> {
     if let Some(dir) = env::var_os("XDG_STATE_HOME").filter(|d| !d.is_empty()) {
         return Ok(PathBuf::from(dir).join("agent-instructions"));
     }
-    let home = env::var_os("HOME")
-        .map(PathBuf::from)
-        .ok_or_else(|| Error::Failed("HOME is not set".into()))?;
-    Ok(home.join(".local/state/agent-instructions"))
+    Ok(home()?.join(".local/state/agent-instructions"))
 }
 
 fn lock_path() -> Result<PathBuf, Error> {

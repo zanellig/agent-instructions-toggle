@@ -66,6 +66,11 @@ fn status(machine: bool) -> ExitCode {
     for line in ui::warnings(&report) {
         println!("{line}");
     }
+    // Only `status` lists these. A skipped backup is not a warning, but it
+    // should never be invisible either.
+    for label in &report.ignored {
+        println!("ignored: {label} (looks like a backup)");
+    }
     ExitCode::SUCCESS
 }
 
