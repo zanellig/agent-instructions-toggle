@@ -11,6 +11,13 @@ fn main() {
     let _program = args.next();
     let operation = args.next();
 
+    if operation.as_deref() == Some(std::ffi::OsStr::new("__installer-claude-homes"))
+        && args.next().is_none()
+    {
+        write_installer_claude_homes();
+        return;
+    }
+
     if operation.as_deref() == Some(std::ffi::OsStr::new("status")) && args.next().is_none() {
         match state::inspect() {
             Ok(inspection) => {
@@ -18,7 +25,10 @@ fn main() {
                 print_warnings(&inspection);
             }
             Err(error) => {
-                eprintln!("agent-instructions: {}", output::text(&error.to_string()));
+                eprintln!(
+                    "agent-instructions: {}",
+                    output::escape_text(&error.to_string())
+                );
                 std::process::exit(1);
             }
         }
@@ -38,7 +48,7 @@ fn main() {
 
     if operation.as_deref() == Some(std::ffi::OsStr::new("tray")) && args.next().is_none() {
         if let Err(error) = tray::run() {
-            eprintln!("agent-instructions: {}", output::text(&error));
+            eprintln!("agent-instructions: {}", output::escape_text(&error));
             std::process::exit(1);
         }
         return;
@@ -73,10 +83,37 @@ fn run_mutation(operation: state::Operation) {
         Err(state::ApplyError::Operational(error)) => {
             let message = format!(
                 "The instruction-state change failed: {}",
-                output::text(&error)
+                output::escape_text(&error)
             );
             eprintln!("agent-instructions: {message}");
             notify_best_effort("Agent instruction change failed", &message);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn write_installer_claude_homes() {
+    use std::io::Write;
+    use std::os::unix::ffi::OsStrExt;
+
+    let inspection = match state::inspect() {
+        Ok(inspection) => inspection,
+        Err(error) => {
+            eprintln!(
+                "agent-instructions: {}",
+                output::escape_text(&error.to_string())
+            );
+            std::process::exit(1);
+        }
+    };
+    let stdout = std::io::stdout();
+    let mut stdout = stdout.lock();
+    for directory in inspection.claude_profile_directories() {
+        if stdout
+            .write_all(directory.as_os_str().as_bytes())
+            .and_then(|_| stdout.write_all(&[0]))
+            .is_err()
+        {
             std::process::exit(1);
         }
     }

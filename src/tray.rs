@@ -117,7 +117,8 @@ pub fn run() -> Result<(), String> {
             format!("could not start the tray indicator: {error}")
         }
     })?;
-    let inspection = state::inspect().map_err(|error| crate::output::text(&error.to_string()))?;
+    let inspection =
+        state::inspect().map_err(|error| crate::output::escape_text(&error.to_string()))?;
     let (sender, receiver) = mpsc::channel();
     let indicator = Indicator {
         inspection: inspection.clone(),
@@ -163,7 +164,7 @@ fn event_loop(
             TrayEvent::Filesystem(Err(error)) => {
                 eprintln!(
                     "agent-instructions: could not observe an instruction document: {}",
-                    crate::output::text(&error.to_string())
+                    crate::output::escape_text(&error.to_string())
                 );
             }
             TrayEvent::Quit => break,
@@ -225,7 +226,7 @@ fn watcher_for(
     .map_err(|error| {
         format!(
             "could not observe instruction documents: {}",
-            crate::output::text(&error.to_string())
+            crate::output::escape_text(&error.to_string())
         )
     })?;
     for directory in inspection.watch_directories() {
@@ -234,8 +235,8 @@ fn watcher_for(
             .map_err(|error| {
                 format!(
                     "could not observe {}: {error}",
-                    crate::output::path(&directory),
-                    error = crate::output::text(&error.to_string())
+                    crate::output::escape_path(&directory),
+                    error = crate::output::escape_text(&error.to_string())
                 )
             })?;
     }

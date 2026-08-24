@@ -1,3 +1,5 @@
 /.ait-lab-state/
 /.claude/worktrees/
 /target/
+__pycache__/
+*.pyc

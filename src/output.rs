@@ -1,10 +1,10 @@
 use std::path::Path;
 
-pub fn path(path: &Path) -> String {
-    text(&path.to_string_lossy())
+pub fn escape_path(path: &Path) -> String {
+    escape_text(&path.to_string_lossy())
 }
 
-pub fn text(value: &str) -> String {
+pub fn escape_text(value: &str) -> String {
     let mut rendered = String::new();
     for character in value.chars() {
         if character.is_control() {

@@ -79,6 +79,16 @@ impl Inspection {
                 .map(|name| instruction_filename(&name.to_string_lossy()).is_some())
                 .unwrap_or(false))
     }
+
+    pub fn claude_profile_directories(&self) -> impl Iterator<Item = &Path> {
+        self.targets.iter().filter_map(|target| {
+            if target.active.file_name() == Some(std::ffi::OsStr::new("CLAUDE.md")) {
+                target.active.parent()
+            } else {
+                None
+            }
+        })
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -216,7 +226,7 @@ fn inspect_home(home: &Path) -> io::Result<Inspection> {
         };
         let relative = active.strip_prefix(home).unwrap_or(&active);
         targets.push(ManagedTarget {
-            label: format!("~/{}", crate::output::path(relative)),
+            label: format!("~/{}", crate::output::escape_path(relative)),
             active,
             disabled,
             status,
@@ -301,19 +311,19 @@ fn rename_targets(inspection: &Inspection, desired: InstructionState) -> Result<
         let source = fs::symlink_metadata(&plan.from).map_err(|error| {
             ApplyError::Operational(format!(
                 "preflight could not inspect {}: {error}",
-                crate::output::path(&plan.from)
+                crate::output::escape_path(&plan.from)
             ))
         })?;
         if !source.file_type().is_file() && !source.file_type().is_symlink() {
             return Err(ApplyError::Operational(format!(
                 "preflight rejected {} because it is not a document",
-                crate::output::path(&plan.from)
+                crate::output::escape_path(&plan.from)
             )));
         }
         if path_exists(&plan.to).map_err(operational_error)? {
             return Err(ApplyError::Operational(format!(
                 "preflight refused to overwrite {}",
-                crate::output::path(&plan.to)
+                crate::output::escape_path(&plan.to)
             )));
         }
     }
@@ -330,8 +340,8 @@ fn rename_targets(inspection: &Inspection, desired: InstructionState) -> Result<
             let rollback_failures = rollback(&completed);
             let mut message = format!(
                 "could not rename {} to {}: {error}",
-                crate::output::path(&plan.from),
-                crate::output::path(&plan.to)
+                crate::output::escape_path(&plan.from),
+                crate::output::escape_path(&plan.to)
             );
             if !rollback_failures.is_empty() {
                 message.push_str("; rollback also failed: ");
@@ -357,8 +367,8 @@ fn rollback(completed: &[RenamePlan]) -> Vec<String> {
         if let Err(error) = rename_without_overwrite(&plan.to, &plan.from) {
             failures.push(format!(
                 "{} to {}: {error}",
-                crate::output::path(&plan.to),
-                crate::output::path(&plan.from)
+                crate::output::escape_path(&plan.to),
+                crate::output::escape_path(&plan.from)
             ));
         }
     }
@@ -401,7 +411,7 @@ fn rename_without_overwrite(from: &Path, to: &Path) -> io::Result<()> {
 }
 
 fn operational_error(error: io::Error) -> ApplyError {
-    ApplyError::Operational(crate::output::text(&error.to_string()))
+    ApplyError::Operational(crate::output::escape_text(&error.to_string()))
 }
 
 #[cfg(debug_assertions)]

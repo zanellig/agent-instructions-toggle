@@ -5,18 +5,11 @@ import json
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
-
-def safe_message(value: object) -> str:
-    rendered = []
-    for character in str(value):
-        if not character.isprintable() or character in "<>&":
-            rendered.append(f"\\u{{{ord(character):x}}}")
-        else:
-            rendered.append(character)
-    return "".join(rendered)
+from safe_output import safe_message
 
 
 def atomic_write(path: Path, contents: str, mode: int) -> None:
@@ -80,24 +73,16 @@ def merge_claude_status(
     atomic_write(settings_path, json.dumps(settings, indent=2) + "\n", 0o600)
 
 
-def discovered_claude_homes(home: Path, source: Path) -> list[Path]:
-    markers = [
-        marker
-        for marker in (source / "assets" / "archive-markers.txt")
-        .read_text(encoding="utf-8")
-        .splitlines()
-        if marker
-    ]
-    profiles = []
-    for candidate in home.iterdir():
-        name = candidate.name
-        if not candidate.is_dir() or not name.startswith(".claude"):
-            continue
-        suffix = name[len(".claude") :].lower()
-        if suffix.endswith("~") or any(marker in suffix for marker in markers):
-            continue
-        profiles.append(candidate)
-    return sorted(profiles)
+def discovered_claude_homes(binary: Path) -> list[Path]:
+    result = subprocess.run(
+        [binary, "__installer-claude-homes"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise OSError("the installed binary could not discover Claude profiles")
+    return [Path(os.fsdecode(value)) for value in result.stdout.split(b"\0") if value]
 
 
 def status_config_path(data_home: Path, claude_home: Path) -> Path:
@@ -135,7 +120,10 @@ def main() -> int:
         wrapper.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(args.source / "scripts" / "claude-status-line.py", wrapper)
         wrapper.chmod(0o755)
-        for claude_home in discovered_claude_homes(args.home, args.source):
+        safe_output = wrapper.with_name("safe_output.py")
+        shutil.copy2(args.source / "scripts" / "safe_output.py", safe_output)
+        safe_output.chmod(0o644)
+        for claude_home in discovered_claude_homes(args.binary):
             merge_claude_status(
                 claude_home,
                 args.binary,
