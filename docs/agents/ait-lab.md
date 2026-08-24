@@ -67,7 +67,7 @@ Candidate build scripts and binaries see `/usr`, `/etc`, a read-only Rust toolch
 
 Installers write desktop entries into the synthetic XDG directories. Desktop-cache refresh commands are stubs, so the lab does not register the candidate shortcut or autostart entry with the live desktop. Test those persistent integrations in a disposable Plasma user or virtual machine.
 
-Generated homes, build outputs, Cargo downloads, sockets, credentials, and logs stay under `.ait-lab-state/`, which Git ignores.
+Generated homes, build outputs, Cargo downloads, credentials, and logs stay under `.ait-lab-state/`, which Git ignores. The filtered D-Bus socket lives under `$XDG_RUNTIME_DIR/ait-lab` so long checkout paths cannot exceed the Unix socket path limit; the supervisor removes it when the session stops.
 
 ## Verify the lab
 

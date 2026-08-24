@@ -5,7 +5,7 @@ set -euo pipefail
 readonly TEST_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 readonly LAB="$TEST_ROOT/ait-lab"
 readonly TEST_TEMP=$(mktemp -d)
-readonly TEST_STATE="$TEST_TEMP/playground/agent-instructions-toggle/.ait-lab-state"
+readonly TEST_STATE="$TEST_TEMP/playground/agent-instructions-toggle-with-a-deliberately-long-checkout-name-for-unix-socket-regression/.ait-lab-state"
 readonly FAKE_CANDIDATE="$TEST_ROOT/tests/ait-lab/fake-candidate"
 readonly FAKE_CLAUDE="$TEST_ROOT/tests/ait-lab/fake-claude"
 LAB_BUS_PID=""
@@ -73,6 +73,7 @@ assert_session_stopped() {
 
 run_lab() {
     AIT_LAB_STATE_ROOT="$TEST_STATE" \
+    AIT_LAB_SOCKET_ROOT="$TEST_TEMP/bus" \
     AIT_LAB_SOURCE_CLAUDE="$FAKE_CANDIDATE" \
     AIT_LAB_SOURCE_CODEX_NC="$FAKE_CANDIDATE" \
     AIT_LAB_SOURCE_CODEX_FC="$FAKE_CANDIDATE" \
@@ -109,13 +110,14 @@ test_use_starts_an_isolated_candidate() {
     ln -s "$TEST_ROOT/tests/ait-lab" "$local_project/tests/ait-lab"
 
     output=$(AIT_LAB_STATE_ROOT="$local_state" \
+        AIT_LAB_SOCKET_ROOT="$TEST_TEMP/local-bus" \
         AIT_LAB_CLAUDE_EXECUTABLE="$FAKE_CLAUDE" \
         AIT_LAB_SESSION_BUS_ADDRESS="$LAB_BUS_ADDRESS" \
         "$local_lab" use claude)
     assert_contains "from implementations/claude" "$output" "use should select an in-repo implementation"
-    output=$(AIT_LAB_STATE_ROOT="$local_state" "$local_lab" show)
+    output=$(AIT_LAB_STATE_ROOT="$local_state" AIT_LAB_SOCKET_ROOT="$TEST_TEMP/local-bus" "$local_lab" show)
     assert_contains "Source: implementations/claude" "$output" "show should report the in-repo source"
-    AIT_LAB_STATE_ROOT="$local_state" "$local_lab" stop >/dev/null
+    AIT_LAB_STATE_ROOT="$local_state" AIT_LAB_SOCKET_ROOT="$TEST_TEMP/local-bus" "$local_lab" stop >/dev/null
 
     output=$(run_lab use claude)
     assert_contains "Using claude" "$output" "use should report the selected implementation"

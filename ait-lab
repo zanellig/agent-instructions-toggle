@@ -4,6 +4,7 @@ set -euo pipefail
 
 readonly AIT_LAB_PROJECT_ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 readonly AIT_LAB_STATE_ROOT=${AIT_LAB_STATE_ROOT:-"$AIT_LAB_PROJECT_ROOT/.ait-lab-state"}
+readonly AIT_LAB_SOCKET_ROOT=${AIT_LAB_SOCKET_ROOT:-"${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/ait-lab"}
 readonly AIT_LAB_ACTIVE_FILE="$AIT_LAB_STATE_ROOT/active"
 readonly AIT_LAB_FIXTURES="$AIT_LAB_PROJECT_ROOT/tests/ait-lab/fixtures"
 readonly AIT_LAB_STUBS="$AIT_LAB_PROJECT_ROOT/tests/ait-lab/stubs"
@@ -315,7 +316,7 @@ runtime_sandbox() {
         --bind "$session/home" /lab/session/home \
         --bind "$session/project" /lab/session/project \
         --bind "$session/xdg" /lab/session/xdg \
-        --ro-bind "$AIT_LAB_STATE_ROOT/bus" /lab/bus \
+        --ro-bind "$AIT_LAB_SOCKET_ROOT" /lab/bus \
         --unshare-all \
         --as-pid-1 \
         --clearenv \
@@ -346,7 +347,7 @@ run_active_app() {
     session=$(active_session) || die 'no active lab session; run ./ait-lab use first'
     sandbox_binary=$(jq -r '.sandboxBinary' "$session/manifest.json")
     proxy_name=$(<"$session/runtime/dbus-socket-name")
-    proxy_socket="$AIT_LAB_STATE_ROOT/bus/$proxy_name"
+    proxy_socket="$AIT_LAB_SOCKET_ROOT/$proxy_name"
     [[ -S "$proxy_socket" ]] || die 'the active session bus proxy is not running'
     mapfile -d '' -t sandbox < <(runtime_sandbox "$session")
     "${sandbox[@]}" \
@@ -498,11 +499,12 @@ start_session() {
     [[ -n "$bus_address" ]] || die 'DBUS_SESSION_BUS_ADDRESS is not set; a live session bus is required for the tray'
     sandbox_binary=$(jq -r '.sandboxBinary' "$session/manifest.json")
     rm -f -- "$session/runtime/ready"
-    mkdir -p -- "$AIT_LAB_STATE_ROOT/bus"
+    mkdir -p -- "$AIT_LAB_SOCKET_ROOT"
+    chmod 700 -- "$AIT_LAB_SOCKET_ROOT"
     proxy_hash=$(printf '%s' "$session" | sha256sum)
     proxy_name="${proxy_hash%% *}"
     proxy_name="${proxy_name:0:16}.sock"
-    proxy_socket="$AIT_LAB_STATE_ROOT/bus/$proxy_name"
+    proxy_socket="$AIT_LAB_SOCKET_ROOT/$proxy_name"
     sandbox_bus_address="unix:path=/lab/bus/$proxy_name"
     printf '%s\n' "$proxy_name" > "$session/runtime/dbus-socket-name"
     supervisor_unit="ait-lab-${proxy_name%.sock}-$$.service"
@@ -511,6 +513,7 @@ start_session() {
     systemd-run --user --quiet --collect \
         --unit "$supervisor_unit" \
         --setenv "AIT_LAB_STATE_ROOT=$AIT_LAB_STATE_ROOT" \
+        --setenv "AIT_LAB_SOCKET_ROOT=$AIT_LAB_SOCKET_ROOT" \
         "$AIT_LAB_PROJECT_ROOT/ait-lab" __supervise \
         "$session" "$sandbox_binary" "$bus_address" "$proxy_socket" "$sandbox_bus_address" \
         </dev/null >> "$session/logs/supervisor.log" 2>&1 \
@@ -655,7 +658,7 @@ if [[ "${1:-}" == __supervise ]]; then
     AIT_LAB_INTERNAL_SESSION=$(validate_session_directory "$2")
     [[ "$3" == "$(jq -r '.sandboxBinary' "$AIT_LAB_INTERNAL_SESSION/manifest.json")" ]] || exit 2
     case "$(realpath -m -- "$5")" in
-        "$(realpath -m -- "$AIT_LAB_STATE_ROOT")"/bus/*.sock) ;;
+        "$(realpath -m -- "$AIT_LAB_SOCKET_ROOT")"/*.sock) ;;
         *) exit 2 ;;
     esac
     [[ "$6" == "unix:path=/lab/bus/$(basename -- "$5")" ]] || exit 2
